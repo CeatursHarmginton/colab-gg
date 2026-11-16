@@ -37,6 +37,7 @@ RESTORE_BACKUP="${RESTORE_BACKUP:-ask}"
 BACKUP_ON_EXIT="${BACKUP_ON_EXIT:-ask}"
 AUTO_PAIR="${AUTO_PAIR:-true}"
 KEEP_ALIVE_LOOP="${KEEP_ALIVE_LOOP:-true}"
+SETUP_ONLY="${SETUP_ONLY:-false}"
 
 # Relay & Cloudflare TURN / Zero Trust options
 COLABGG_RELAY_URL="${COLABGG_RELAY_URL:-}"
@@ -554,6 +555,11 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 PYAUTOPAIR
+    fi
+
+    if [ "$SETUP_ONLY" = "true" ]; then
+        log_info "Local Cloud Gaming stack (Xorg + Sunshine + Moonlight-Web) is ready!"
+        return 0
     fi
 
     # 11. Optional Cloudflare Zero Trust Named Tunnel (WARP + Native Moonlight App)
