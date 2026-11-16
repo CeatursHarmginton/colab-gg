@@ -329,37 +329,47 @@
       <!-- Left: Connection Card -->
       <div class="card">
         <h2 class="card-title">
-          <span>1. Kết nối Phòng Colab ( kiểu VaultBox )</span>
-          <button id="btn-paste" type="button" style="padding:6px 11px;font-size:12px;">📋 Dán từ Clipboard</button>
+          <span>1. Kết nối nhanh với Colab (Chỉ 1 bước)</span>
         </h2>
         <p class="card-sub">
-          Copy dòng <code>COLABGG_CONNECT: {...}</code> từ Google Colab rồi bấm <b>Dán từ Clipboard</b> (hoặc dán thẳng vào ô dưới đây).
+          Không cần nhập từng ô! Chỉ cần bấm <b>Copy Toàn Bộ Thông Tin</b> bên Google Colab rồi bấm nút <b>Dán &amp; Kết nối ngay</b> dưới đây (hoặc nhấn <code>Ctrl + V</code> vào ô).
         </p>
 
         <div id="msg-box" class="alert"></div>
 
-        <label for="bundle-input">Auto-Connect Bundle</label>
+        <button id="btn-paste" class="btn-play" type="button" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:8px;">
+          📋 Dán từ Clipboard &amp; Kết nối ngay (1-Click)
+        </button>
+
+        <label for="bundle-input">Hoặc nhấn Ctrl+V dán toàn bộ thông tin kết nối vào ô này</label>
         <div class="row">
-          <input id="bundle-input" class="mono" type="text" placeholder="COLABGG_CONNECT: {&quot;serverUrl&quot;:...,&quot;roomId&quot;:...,&quot;serverToken&quot;:...}" spellcheck="false" />
+          <textarea id="bundle-input" class="mono" rows="3" style="width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--border);background:#020617;color:var(--accent);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px;resize:vertical;outline:none;" placeholder="Dán nguyên khối thông tin copy từ Colab (COLABGG_CONNECT: {...}) vào đây — hệ thống sẽ tự tách URL, Room ID &amp; Token và kết nối luôn!" spellcheck="false"></textarea>
         </div>
 
-        <label for="server-url">Cloudflare Relay Server URL</label>
-        <div class="row">
-          <input id="server-url" class="mono" type="text" placeholder="https://colabgg-relay.<subdomain>.workers.dev" spellcheck="false" />
-        </div>
+        <details style="margin-bottom:14px;background:rgba(2,6,23,0.55);border:1px solid #1e293b;border-radius:10px;padding:10px 12px;">
+          <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);user-select:none;">
+            ⚙️ Xem / Sửa thủ công từng mục (Server URL, Room ID, Token)
+          </summary>
+          <div style="margin-top:12px;">
+            <label for="server-url">Cloudflare Relay Server URL</label>
+            <div class="row">
+              <input id="server-url" class="mono" type="text" placeholder="https://colabgg-relay.baocryptonft.workers.dev" spellcheck="false" />
+            </div>
 
-        <div class="two-col">
-          <div>
-            <label for="room-id">Room ID</label>
-            <input id="room-id" class="mono" type="text" placeholder="gg-xxxxxxxx" spellcheck="false" />
+            <div class="two-col" style="margin-bottom:10px;">
+              <div>
+                <label for="room-id">Room ID</label>
+                <input id="room-id" class="mono" type="text" placeholder="gg-xxxxxxxx" spellcheck="false" />
+              </div>
+              <div>
+                <label for="room-token">Connection Token</label>
+                <input id="room-token" class="mono" type="password" placeholder="••••••••••••" spellcheck="false" />
+              </div>
+            </div>
+
+            <button id="btn-connect" class="btn-primary" type="button">🔗 Kết nối bằng thông tin thủ công</button>
           </div>
-          <div>
-            <label for="room-token">Connection Token</label>
-            <input id="room-token" class="mono" type="password" placeholder="••••••••••••" spellcheck="false" />
-          </div>
-        </div>
-
-        <button id="btn-connect" class="btn-primary" type="button">🔗 Kiểm tra &amp; Kết nối Phòng</button>
+        </details>
 
         <div style="margin-top:20px;">
           <label>Cấu hình nhanh luồng Stream (WebRTC / Video)</label>
@@ -493,22 +503,45 @@
 
     function parseBundleString(raw) {
       if (!raw) return null;
-      let s = String(raw).trim();
-      const idx = s.indexOf("COLABGG_CONNECT:");
-      if (idx !== -1) {
-        s = s.slice(idx + "COLABGG_CONNECT:".length).trim();
+      const text = String(raw).trim();
+
+      // 1. Support pasting a #connect=<base64> Magic Link URL
+      const hashMatch = text.match(/#connect=([A-Za-z0-9+/=%_-]+)/);
+      if (hashMatch) {
+        try {
+          const decoded = atob(decodeURIComponent(hashMatch[1]));
+          const inner = parseBundleString(decoded);
+          if (inner) return inner;
+        } catch {}
       }
-      if (!s.startsWith("{")) return null;
-      try {
-        const obj = JSON.parse(s);
-        if (obj && (obj.roomId || obj.room_id)) {
-          return {
-            serverUrl: String(obj.serverUrl || obj.url || els.serverUrl.value || "").replace(/\/+$/, ""),
-            roomId: String(obj.roomId || obj.room_id || "").trim(),
-            token: String(obj.serverToken || obj.token || "").trim(),
-          };
-        }
-      } catch {}
+
+      // 2. Support COLABGG_CONNECT: {...} or embedded JSON object anywhere in copied text
+      const jsonMatch = text.match(/\{[\s\S]*?"(?:roomId|room_id)"[\s\S]*?\}/);
+      if (jsonMatch) {
+        try {
+          const obj = JSON.parse(jsonMatch[0]);
+          if (obj && (obj.roomId || obj.room_id)) {
+            return {
+              serverUrl: String(obj.serverUrl || obj.url || els.serverUrl.value || "").replace(/\/+$/, ""),
+              roomId: String(obj.roomId || obj.room_id || "").trim(),
+              token: String(obj.serverToken || obj.token || "").trim(),
+            };
+          }
+        } catch {}
+      }
+
+      // 3. Support multi-line key-value text (e.g. Server URL: ... / Room ID: ... / Token: ...)
+      const urlM = text.match(/(?:Server\s*URL|Relay\s*URL|URL)\s*:\s*(https?:\/\/\S+)/i);
+      const roomM = text.match(/Room\s*ID\s*:\s*([A-Za-z0-9_.:-]+)/i);
+      const tokM = text.match(/(?:Connection\s*Token|Server\s*Token|Token)\s*:\s*([A-Za-z0-9_.-]+)/i);
+      if (roomM && tokM) {
+        return {
+          serverUrl: String((urlM && urlM[1]) || els.serverUrl.value || "").replace(/\/+$/, ""),
+          roomId: roomM[1].trim(),
+          token: tokM[1].trim(),
+        };
+      }
+
       return null;
     }
 
