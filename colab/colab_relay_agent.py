@@ -243,7 +243,7 @@ def apply_turn_to_moonweb_config(turn_servers: list[dict], local_client: LocalMo
 
 
 def _ws_connect_kwargs(websockets_mod, headers: dict[str, str] | None = None) -> dict:
-    kwargs: dict = {"max_size": None, "ping_interval": 20, "ping_timeout": 20}
+    kwargs: dict = {"max_size": None, "ping_interval": 30, "ping_timeout": 25}
     if headers:
         sig = inspect.signature(websockets_mod.connect)
         if "additional_headers" in sig.parameters:
@@ -341,11 +341,15 @@ async def relay_main() -> None:
                 print(f"[ColabGG Relay] Connected to room '{ROOM_ID}' at {RELAY_URL}!", flush=True)
 
                 async def heartbeat_loop() -> None:
+                    nonlocal apps
                     tick = 0
                     while True:
-                        await asyncio.sleep(8.0)
+                        await asyncio.sleep(60.0)
                         tick += 1
-                        cur_apps = await asyncio.to_thread(local_client.get_apps) if tick % 3 == 0 else apps
+                        if not apps or tick % 5 == 0:
+                            fresh = await asyncio.to_thread(local_client.get_apps)
+                            if fresh:
+                                apps = fresh
                         await ws.send(json.dumps({
                             "type": "heartbeat",
                             "gpuName": gpu_name,
@@ -353,7 +357,7 @@ async def relay_main() -> None:
                             "resolution": resolution,
                             "privateIp": priv_ip,
                             "turnActive": local_client.turn_applied,
-                            "apps": cur_apps,
+                            "apps": apps,
                         }))
 
                 hb_task = asyncio.create_task(heartbeat_loop())

@@ -746,11 +746,11 @@
           } catch {}
         });
         pingTimer = setInterval(() => {
-          if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+          if (!document.hidden && liveWs && liveWs.readyState === WebSocket.OPEN) {
             lastPingSent = performance.now();
-            liveWs.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+            liveWs.send('{"type":"ping"}');
           }
-        }, 5000);
+        }, 30000);
       } catch (e) {
         showMsg("Không thể kết nối tới Cloudflare Relay Server: " + e.message, "err");
       }

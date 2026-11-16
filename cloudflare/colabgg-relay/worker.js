@@ -6,11 +6,10 @@ const JSON_HEADERS = {
   "access-control-allow-headers": "authorization,content-type,range,x-colabgg-token",
 };
 
-const HEARTBEAT_TIMEOUT_MS = 35 * 1000;
+const HEARTBEAT_TIMEOUT_MS = 180 * 1000;
 const OFFLINE_PRUNE_MS = 3 * 24 * 60 * 60 * 1000;
-const WATCHDOG_ALARM_INTERVAL_MS = 20 * 1000;
 const HTTP_RPC_TIMEOUT_MS = 22 * 1000;
-const TURN_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // Refresh TURN creds every 6h (valid 24h)
+const TURN_CACHE_TTL_MS = 18 * 60 * 60 * 1000; // Refresh TURN creds every 18h (valid 24h)
 
 function json(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
@@ -102,7 +101,7 @@ export default {
             status: 200,
             headers: {
               "content-type": "application/javascript; charset=utf-8",
-              "cache-control": "no-store",
+              "cache-control": "private, max-age=3600",
             },
           });
         }
@@ -131,10 +130,16 @@ export default {
           const assetPath = gw.rest === "/" ? "/moonlight/index.html" : `/moonlight${gw.rest}`;
           const assetUrl = new URL(request.url);
           assetUrl.pathname = assetPath;
-          return await env.ASSETS.fetch(new Request(assetUrl.toString(), {
+          const assetResp = await env.ASSETS.fetch(new Request(assetUrl.toString(), {
             method: "GET",
             headers: request.headers,
           }));
+          if (assetResp.status === 200) {
+            const cachedHeaders = new Headers(assetResp.headers);
+            cachedHeaders.set("cache-control", "public, max-age=86400");
+            return new Response(assetResp.body, { status: 200, headers: cachedHeaders });
+          }
+          return assetResp;
         }
         return new Response("Static assets binding unavailable", { status: 404 });
       }
@@ -196,6 +201,15 @@ export class ColabGGRoom {
     this.streamEarlyQueue = new Map(); // streamId -> Array<string | ArrayBuffer>
     this.cachedTurn = { servers: null, fetchedAt: 0 };
 
+    // Zero-cost Edge auto-responder for dashboard RTT pings (does not wake or bill Durable Object!)
+    try {
+      if (typeof WebSocketRequestResponsePair !== "undefined" && state.setWebSocketAutoResponse) {
+        state.setWebSocketAutoResponse(
+          new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}')
+        );
+      }
+    } catch {}
+
     if (state.blockConcurrencyWhile) {
       state.blockConcurrencyWhile(async () => {
         const saved = await state.storage.get("roomMeta").catch(() => null);
@@ -214,10 +228,10 @@ export class ColabGGRoom {
     } catch {}
   }
 
-  async scheduleWatchdog() {
+  async scheduleCleanupAlarm() {
     try {
       if (this.state?.storage?.setAlarm) {
-        await this.state.storage.setAlarm(Date.now() + WATCHDOG_ALARM_INTERVAL_MS);
+        await this.state.storage.setAlarm(Date.now() + OFFLINE_PRUNE_MS);
       }
     } catch {}
   }
@@ -303,25 +317,11 @@ export class ColabGGRoom {
   }
 
   async alarm() {
-    const now = Date.now();
-    const colabSockets = this.getSockets((att) => att.role === "colab");
-    if (colabSockets.length > 0) {
-      const silentMs = this.roomMeta.lastColabActivityAt ? now - this.roomMeta.lastColabActivityAt : 0;
-      if (silentMs > HEARTBEAT_TIMEOUT_MS) {
-        for (const { ws } of colabSockets) {
-          try {
-            ws.close(1001, "heartbeat_timeout");
-          } catch {}
+    if (!this.isColabOnline() && this.roomMeta.colabDisconnectedAt) {
+      if (Date.now() - this.roomMeta.colabDisconnectedAt >= OFFLINE_PRUNE_MS - 5000) {
+        if (this.state?.storage?.deleteAll) {
+          await this.state.storage.deleteAll().catch(() => {});
         }
-        this.roomMeta.colabDisconnectedAt = now;
-        await this.saveMeta();
-        this.broadcastToClients({ type: "status", ...this.buildPublicStatus() });
-      } else {
-        await this.scheduleWatchdog();
-      }
-    } else if (this.roomMeta.colabDisconnectedAt && now - this.roomMeta.colabDisconnectedAt > OFFLINE_PRUNE_MS) {
-      if (this.state?.storage?.deleteAll) {
-        await this.state.storage.deleteAll().catch(() => {});
       }
     }
   }
@@ -450,7 +450,6 @@ export class ColabGGRoom {
         this.roomMeta.colabConnectedAt = now;
         this.roomMeta.colabDisconnectedAt = null;
         await this.saveMeta();
-        await this.scheduleWatchdog();
 
         const turnServers = await this.getTurnIceServers();
         server.send(JSON.stringify({
@@ -664,6 +663,16 @@ export class ColabGGRoom {
     }
 
     if (msg.type === "hello" || msg.type === "heartbeat") {
+      const prevSig = JSON.stringify([
+        this.roomMeta.serverName,
+        this.roomMeta.gpuName,
+        this.roomMeta.driverVersion,
+        this.roomMeta.resolution,
+        this.roomMeta.privateIp,
+        this.roomMeta.turnActive,
+        this.roomMeta.apps,
+      ]);
+
       if (msg.serverName) this.roomMeta.serverName = String(msg.serverName).slice(0, 80);
       if (msg.gpuName !== undefined) this.roomMeta.gpuName = String(msg.gpuName || "").slice(0, 80);
       if (msg.driverVersion !== undefined) this.roomMeta.driverVersion = String(msg.driverVersion || "").slice(0, 40);
@@ -677,9 +686,22 @@ export class ColabGGRoom {
         this.roomMeta.desktopAppId = desk ? desk.app_id : (this.roomMeta.apps[0]?.app_id ?? null);
         this.roomMeta.steamAppId = steam ? steam.app_id : null;
       }
-      await this.saveMeta();
-      await this.scheduleWatchdog();
-      this.broadcastToClients({ type: "status", ...this.buildPublicStatus() });
+
+      const nextSig = JSON.stringify([
+        this.roomMeta.serverName,
+        this.roomMeta.gpuName,
+        this.roomMeta.driverVersion,
+        this.roomMeta.resolution,
+        this.roomMeta.privateIp,
+        this.roomMeta.turnActive,
+        this.roomMeta.apps,
+      ]);
+
+      // Only write to SQLite & broadcast when metadata actually changed (saves 99%+ DO row writes & messages!)
+      if (msg.type === "hello" || prevSig !== nextSig) {
+        await this.saveMeta();
+        this.broadcastToClients({ type: "status", ...this.buildPublicStatus() });
+      }
     }
   }
 
@@ -704,6 +726,7 @@ export class ColabGGRoom {
       if (!this.isColabOnline(ws)) {
         this.roomMeta.colabDisconnectedAt = Date.now();
         await this.saveMeta();
+        await this.scheduleCleanupAlarm();
         this.broadcastToClients({ type: "status", ...this.buildPublicStatus() });
       }
     }
