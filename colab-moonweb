@@ -183,21 +183,73 @@ install_matching_nvidia_driver() {
 
     local installer="/bakdeb/NVIDIA-Linux-x86_64-${host_ver}.run"
     if [ ! -f "$installer" ]; then
-        log_warn "Bundled NVIDIA installer does not match host kernel ($host_ver). Downloading NVIDIA-$host_ver.run..."
+        log_warn "Bundled NVIDIA installer (580.82.07) differs from host kernel ($host_ver). Downloading matching NVIDIA-$host_ver.run..."
         installer="/tmp/NVIDIA-Linux-x86_64-${host_ver}.run"
-        if ! wget -q --retry-connrefused --tries=3 -O "$installer" "https://us.download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" && \
-           ! wget -q --retry-connrefused --tries=3 -O "$installer" "https://download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run"; then
+        local dl_ok="false"
+        for nv_url in \
+            "https://us.download.nvidia.com/tesla/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
+            "https://download.nvidia.com/tesla/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
+            "https://us.download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
+            "https://download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run"
+        do
+            if wget -q --retry-connrefused --tries=2 -O "$installer" "$nv_url"; then
+                if [ -s "$installer" ]; then
+                    dl_ok="true"
+                    log_info "Downloaded matching NVIDIA driver ($host_ver) from $nv_url"
+                    break
+                fi
+            fi
             rm -f "$installer"
-            local major="${host_ver%%.*}"
-            run_step "Install xserver-xorg-video-nvidia-${major}" "sudo apt-get update -y && sudo apt-get install -y xserver-xorg-video-nvidia-${major} libnvidia-gl-${major} libnvidia-gl-${major}:i386 libnvidia-encode-${major}" || return 1
-            mark_done "nvidia_driver_installed"
-            return 0
+        done
+
+        if [ "$dl_ok" != "true" ]; then
+            log_warn "Exact NVIDIA-$host_ver.run archive not found; falling back to bundled /bakdeb/NVIDIA*.run..."
+            installer=$(ls /bakdeb/NVIDIA*.run 2>/dev/null | head -n 1 || true)
+            if [ -z "$installer" ] || [ ! -f "$installer" ]; then
+                log_err "No NVIDIA installer available!"
+                return 1
+            fi
         fi
     fi
 
     chmod +x "$installer"
-    run_step "Install NVIDIA userspace & Xorg driver ($host_ver)" \
-        "sudo '$installer' --silent --no-kernel-module --install-compat32-libs --no-nouveau-check --no-nvidia-modprobe --no-rpms --no-backup" || return 1
+    log_info "Installing NVIDIA userspace & Xorg driver ($installer)..."
+    echo "=== Installing NVIDIA driver ($installer) ===" >> "$LOG_FILE"
+    sudo "$installer" --silent --no-kernel-module --install-compat32-libs --no-nouveau-check --no-nvidia-modprobe --no-backup >> "$LOG_FILE" 2>&1 || \
+    (echo 1 | sudo "$installer" --no-kernel-module --ui=none --no-questions >> "$LOG_FILE" 2>&1) || true
+
+    # If container bind-mounts prevented full nvidia-installer completion, manually extract Xorg modules so Xorg :1 works!
+    if [ ! -f /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so ]; then
+        log_warn "nvidia_drv.so not placed by standard installer; extracting Xorg modules directly from .run package..."
+        sudo rm -rf /tmp/nv_extract
+        sudo "$installer" --extract-only --target /tmp/nv_extract >> "$LOG_FILE" 2>&1 || true
+        if [ -f /tmp/nv_extract/nvidia_drv.so ]; then
+            sudo mkdir -p /usr/lib/x86_64-linux-gnu/xorg/modules/drivers /usr/lib/x86_64-linux-gnu/xorg/modules/extensions
+            sudo cp -f /tmp/nv_extract/nvidia_drv.so /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/
+            if [ -f "/tmp/nv_extract/libglxserver_nvidia.so.${host_ver}" ]; then
+                sudo cp -f "/tmp/nv_extract/libglxserver_nvidia.so.${host_ver}" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/
+                sudo ln -sf "libglxserver_nvidia.so.${host_ver}" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so
+                sudo ln -sf "libglxserver_nvidia.so.${host_ver}" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so.1
+            elif ls /tmp/nv_extract/libglxserver_nvidia.so.* >/dev/null 2>&1; then
+                local glx_so
+                glx_so=$(ls /tmp/nv_extract/libglxserver_nvidia.so.* | head -n 1)
+                sudo cp -f "$glx_so" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/
+                sudo ln -sf "$(basename "$glx_so")" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so
+                sudo ln -sf "$(basename "$glx_so")" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so.1
+            fi
+            [ -f /tmp/nv_extract/nvidia-xconfig ] && sudo cp -f /tmp/nv_extract/nvidia-xconfig /usr/bin/ && sudo chmod +x /usr/bin/nvidia-xconfig
+        fi
+        sudo rm -rf /tmp/nv_extract
+    fi
+
+    # Clean up downloaded /tmp installer to save Colab disk space
+    [[ "$installer" == /tmp/* ]] && rm -f "$installer"
+
+    if [ ! -f /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so ]; then
+        log_err "Failed to install nvidia_drv.so! Tail of /var/log/nvidia-installer.log:"
+        tail -n 30 /var/log/nvidia-installer.log 2>/dev/null || true
+        return 1
+    fi
 
     mark_done "nvidia_driver_installed"
 }
@@ -366,12 +418,27 @@ main() {
         sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
         log_info "Starting Xorg server on DISPLAY=:1 ..."
         sudo nohup Xorg :1 -config /etc/X11/xorg.conf -seat seat-1 -novtswitch -nolisten tcp -noreset >/tmp/xorg.log 2>&1 &
-        for _ in $(seq 1 15); do
+        for _ in $(seq 1 10); do
             if DISPLAY=:1 xrandr >/dev/null 2>&1; then
                 break
             fi
             sleep 1
         done
+
+        # Headless datacenter Tesla GPUs (0 display heads) sometimes require --use-display-device=None
+        if ! DISPLAY=:1 xrandr >/dev/null 2>&1 && [ "$has_gpu" = "true" ]; then
+            log_warn "Retrying Xorg :1 with headless --use-display-device=None config..."
+            sudo pkill -f "Xorg :1" >/dev/null 2>&1 || true
+            sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
+            sudo nvidia-xconfig -a --allow-empty-initial-configuration --use-display-device=None --virtual=1920x1080 --preserve-busid >> "$LOG_FILE" 2>&1 || true
+            sudo nohup Xorg :1 -config /etc/X11/xorg.conf -seat seat-1 -novtswitch -nolisten tcp -noreset >/tmp/xorg.log 2>&1 &
+            for _ in $(seq 1 10); do
+                if DISPLAY=:1 xrandr >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
+        fi
     fi
 
     if ! DISPLAY=:1 xrandr >/dev/null 2>&1; then
