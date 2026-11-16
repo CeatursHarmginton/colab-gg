@@ -42,24 +42,44 @@ ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
 
-def sunshine_req(path, payload):
+def sunshine_req(path, method="GET", payload=None, extra_headers=None):
     auth = base64.b64encode(f"{SUN_USER}:{SUN_PASS}".encode()).decode()
-    data = json.dumps(payload).encode("utf-8")
+    headers = {"Authorization": f"Basic {auth}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{SUNSHINE_BASE}{path}",
         data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Basic {auth}",
-        },
+        method=method,
+        headers=headers,
     )
     with urllib.request.urlopen(req, context=ssl_ctx, timeout=15) as resp:
-        return resp.status, resp.read().decode("utf-8", errors="replace")
+        raw_cookies = resp.headers.get_all("Set-Cookie") or []
+        cookie = "; ".join(c.split(";", 1)[0] for c in raw_cookies if "=" in c)
+        return resp.status, resp.read().decode("utf-8", errors="replace"), cookie
+
+
+def get_sunshine_csrf_headers():
+    headers = {}
+    try:
+        _, body, cookie = sunshine_req("/csrf-token", method="GET")
+        if cookie:
+            headers["Cookie"] = cookie
+        obj = json.loads(body)
+        tok = obj.get("csrf_token") or obj.get("token") or ""
+        if tok:
+            headers["X-CSRF-Token"] = tok
+    except Exception:
+        pass
+    return headers
 
 
 def ensure_sunshine_ready():
-    for _ in range(25):
+    for _ in range(30):
         try:
             req = urllib.request.Request(SUNSHINE_BASE.replace("/api", "/"), method="GET")
             urllib.request.urlopen(req, context=ssl_ctx, timeout=3)
@@ -69,18 +89,69 @@ def ensure_sunshine_ready():
         except Exception:
             time.sleep(1)
     try:
+        csrf_hdrs = get_sunshine_csrf_headers()
         sunshine_req(
             "/password",
-            {
+            method="POST",
+            payload={
                 "currentUsername": SUN_USER,
                 "currentPassword": SUN_PASS,
                 "newUsername": SUN_USER,
                 "newPassword": SUN_PASS,
                 "confirmNewPassword": SUN_PASS,
             },
+            extra_headers=csrf_hdrs,
         )
     except Exception:
         pass
+
+
+def submit_sunshine_pin(pin, client_name="moonlight-web"):
+    csrf_hdrs = get_sunshine_csrf_headers()
+    supports_pairing_list = False
+    for _ in range(18):
+        try:
+            _, body, _ = sunshine_req("/pin", method="GET", extra_headers=csrf_hdrs)
+            data = json.loads(body)
+            if isinstance(data, dict) and "pairings" in data:
+                supports_pairing_list = True
+                pairings = data.get("pairings") or []
+                if pairings:
+                    last_status, last_body = 200, body
+                    for item in pairings:
+                        pid = item.get("id") or item.get("pairing_id") or ""
+                        payload = {"pin": pin, "name": client_name}
+                        if pid:
+                            payload["pairing_id"] = pid
+                        last_status, last_body, _ = sunshine_req(
+                            "/pin",
+                            method="POST",
+                            payload=payload,
+                            extra_headers=csrf_hdrs,
+                        )
+                        try:
+                            if json.loads(last_body).get("status") is True:
+                                return last_status, last_body
+                        except Exception:
+                            return last_status, last_body
+                    return last_status, last_body
+                time.sleep(0.35)
+                continue
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 405):
+                break
+            time.sleep(0.35)
+        except Exception:
+            break
+
+    status, body, _ = sunshine_req(
+        "/pin",
+        method="POST",
+        payload={"pin": pin, "name": client_name},
+        extra_headers=csrf_hdrs,
+    )
+    return status, body
 
 
 def web_req(path, method="GET", payload=None, cookie="", timeout=15):
@@ -96,7 +167,7 @@ def web_req(path, method="GET", payload=None, cookie="", timeout=15):
 
 
 def login_moonweb():
-    for _ in range(20):
+    for _ in range(25):
         try:
             resp = web_req("/login", method="POST", payload={"name": WEB_USER, "password": WEB_PASS})
             raw_cookies = resp.headers.get_all("Set-Cookie") or []
@@ -117,7 +188,7 @@ def main():
 
     if mode != "--auto":
         pin = mode.strip()
-        status, body = sunshine_req("/pin", {"pin": pin, "name": "moonlight"})
+        status, body = submit_sunshine_pin(pin, "moonlight")
         print(f"Sunshine PIN response ({status}): {body}")
         return 0
 
@@ -178,7 +249,7 @@ def main():
 
     pin = stage1["Pin"]
     print(f"[Auto-Pair] Generated Moonlight PIN: {pin} -> Submitting to Sunshine...")
-    sunshine_req("/pin", {"pin": pin, "name": "moonlight-web"})
+    submit_sunshine_pin(pin, "moonlight-web")
 
     stage2_raw = pair_resp.readline().decode("utf-8").strip()
     pair_resp.close()

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ColabGG Cloud Gaming — GPU (NVENC 1080p60) + CPU Fallback (Dummy Xorg 720p30)
+# ColabGG Cloud Gaming — Native Ubuntu 24.04/22.04 Edition
+# GPU (NVENC 1080p60) + CPU Fallback (Dummy Xorg 720p30)
 # ==============================================================================
 
 set -uo pipefail
@@ -14,15 +15,16 @@ if [ ! -d "/content" ] && [ "${FORCE_LINUX:-0}" != "1" ]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/lib/games"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/lib/games:$PATH"
 
 STATE_FILE="/var/tmp/colab_gpu_setup.done"
 LOG_FILE="/tmp/colab_gaming_setup.log"
-PACKAGES_URL="https://github.com/kmille36/Colab-Cloud-Gaming/releases/download/1.0.0/t4packages.tar.gz"
-PACKAGES_FALLBACK_URL="https://bit.ly/4dRt1Kn"
 MOONWEB_ZIP_URL="https://github.com/kmille36/moonlight-web-remote/releases/download/0.0.2/colab-linux.zip"
 MOONWEB_FALLBACK_URL="https://bit.ly/4fuW6fO"
 CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+STEAM_DEB_URL="https://cdn.fastly.steamstatic.com/client/installer/steam.deb"
+CHROME_DEB_URL="https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+HEROIC_DEB_URL="https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/download/v2.22.4/Heroic-2.22.4-linux-amd64.deb"
 
 WEB_USER="${WEB_USER:-admin}"
 WEB_PASS="${WEB_PASS:-admin}"
@@ -62,13 +64,13 @@ run_step() {
     local cmd="$2"
     log_info "$desc..."
     echo "=== [$(date -Iseconds)] $desc ===" >> "$LOG_FILE"
-    if bash -c "$cmd" >> "$LOG_FILE" 2>&1; then
+    if bash -eo pipefail -c "$cmd" >> "$LOG_FILE" 2>&1; then
         return 0
     else
         local rc=$?
         log_err "Step failed (exit $rc): $desc"
-        log_err "Last 25 log lines ($LOG_FILE):"
-        tail -n 25 "$LOG_FILE" || true
+        log_err "Last 30 log lines ($LOG_FILE):"
+        tail -n 30 "$LOG_FILE" || true
         return $rc
     fi
 }
@@ -138,10 +140,52 @@ setup_linux_user() {
     printf 'user ALL=(ALL) NOPASSWD:ALL\n' | sudo tee /etc/sudoers.d/colab-user >/dev/null
     sudo chmod 0440 /etc/sudoers.d/colab-user
 
+    local uid
+    uid=$(id -u user)
+    sudo mkdir -p "/run/user/${uid}"
+    sudo chown user:user "/run/user/${uid}"
+    sudo chmod 0700 "/run/user/${uid}"
+
     sudo mkdir -p /home/user/.config/sunshine /home/user/Desktop
     printf '%s\n' "--no-sandbox" "--disable-dev-shm-usage" | sudo tee /home/user/.config/chrome-flags.conf >/dev/null
     printf '%s\n' "--no-sandbox" "--disable-dev-shm-usage" | sudo tee /home/user/.config/electron-flags.conf >/dev/null
+
+    if ! sudo grep -q "COLABGG_ENV" /home/user/.profile 2>/dev/null; then
+        cat <<EOF | sudo tee -a /home/user/.profile >/dev/null
+
+# COLABGG_ENV
+export XDG_RUNTIME_DIR="/run/user/${uid}"
+export DISPLAY=":1"
+export PATH="/usr/local/bin:/usr/games:/usr/lib/games:\$PATH"
+EOF
+    fi
+
+    # Generate clean dark gradient desktop wallpaper if missing
+    if [ ! -f /home/user/colabgg-wallpaper.png ]; then
+        sudo python3 - /home/user/colabgg-wallpaper.png <<'PYWP' || true
+import pathlib, struct, sys, zlib
+w, h = 640, 360
+rows = []
+for y in range(h):
+    row = bytearray([0])
+    fy = y / (h - 1)
+    for x in range(w):
+        fx = x / (w - 1)
+        r = int(11 + 14 * (1 - fy) + 8 * fx)
+        g = int(19 + 34 * (1 - fy) + 18 * fx)
+        b = int(38 + 56 * (1 - fy) + 26 * fx)
+        row.extend((r, g, b))
+    rows.append(bytes(row))
+raw = b"".join(rows)
+def chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b"")
+pathlib.Path(sys.argv[1]).write_bytes(png)
+PYWP
+    fi
+
     sudo chown -R user:user /home/user
+    sudo chmod 666 /dev/nvidia* /dev/dri/* 2>/dev/null || true
 }
 
 restore_backup() {
@@ -151,13 +195,86 @@ restore_backup() {
     setup_linux_user
     log_info "Restoring /content/drive/MyDrive/backup.tar.gz -> /home/user ..."
     pigz -dc /content/drive/MyDrive/backup.tar.gz | sudo tar -xf - -C /home/user
-    sudo chown -R user:user /home/user
+    setup_linux_user
     log_info "Backup restored successfully."
 }
 
+install_native_gaming_packages() {
+    if already_done "packages_installed" && command -v sunshine >/dev/null 2>&1 && command -v steam >/dev/null 2>&1 && command -v Xorg >/dev/null 2>&1; then
+        log_info "Desktop & gaming packages already installed, skipping."
+        return 0
+    fi
+
+    run_step "Enable i386 multiarch & update Ubuntu package index" \
+        "sudo dpkg --add-architecture i386 && sudo apt-get update -y" || return 1
+
+    run_step "Install native Ubuntu Xorg, Openbox, PulseAudio & 32/64-bit Vulkan/OpenGL libraries" \
+        "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove \
+            wget curl pigz unzip jq pciutils psmisc ca-certificates file xz-utils lsof kmod libcap2-bin \
+            xorg xserver-xorg-core xserver-xorg-input-all xserver-xorg-video-dummy x11-xserver-utils x11-utils xauth dbus-x11 \
+            openbox pulseaudio pulseaudio-utils alsa-utils feh xvkbd thunar xterm zenity \
+            libnss3 python3-apt xdg-user-dirs xdg-utils xdg-desktop-portal xdg-desktop-portal-gtk \
+            mesa-utils vulkan-tools libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 libgbm1 libvulkan1 mesa-vulkan-drivers \
+            libc6:i386 libstdc++6:i386 libgcc-s1:i386 libgl1:i386 libgl1-mesa-dri:i386 libglx-mesa0:i386 \
+            libegl1:i386 libgbm1:i386 libvulkan1:i386 mesa-vulkan-drivers:i386 libpulse0:i386 \
+            libx11-6:i386 libxext6:i386 libxinerama1:i386 libxrandr2:i386 libxss1:i386 libxtst6:i386" || return 1
+
+    # Detect Ubuntu version for matching Sunshine .deb
+    local ubu_ver="24.04"
+    if [ -r /etc/os-release ]; then
+        local det_ver
+        det_ver=$(. /etc/os-release && printf "%s" "${VERSION_ID:-24.04}")
+        case "$det_ver" in
+            22.04|24.04|26.04) ubu_ver="$det_ver" ;;
+            *) ubu_ver="24.04" ;;
+        esac
+    fi
+
+    local sun_primary="https://github.com/SunshineStream/Sunshine/releases/download/v2026.914.233613/sunshine_2026.914.233613-1%2Bubuntu${ubu_ver}_amd64.deb"
+    run_step "Download & install Sunshine GameStream Host (Ubuntu ${ubu_ver})" "
+        rm -f /tmp/sunshine.deb
+        if ! wget -q --retry-connrefused --tries=3 -O /tmp/sunshine.deb '$sun_primary' || [ ! -s /tmp/sunshine.deb ]; then
+            eff=\$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/SunshineStream/Sunshine/releases/latest)
+            tag=\"\${eff##*/}\"
+            ver=\"\${tag#v}\"
+            wget -q --retry-connrefused --tries=3 -O /tmp/sunshine.deb \"https://github.com/SunshineStream/Sunshine/releases/download/\${tag}/sunshine_\${ver}-1%2Bubuntu${ubu_ver}_amd64.deb\"
+        fi
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove /tmp/sunshine.deb
+        rm -f /tmp/sunshine.deb
+    " || return 1
+
+    # Clear file capabilities if container bounding set blocks non-root exec
+    if user_exists user && ! su - user -c "sunshine --version" >/dev/null 2>&1; then
+        sudo setcap -r "$(readlink -f "$(command -v sunshine)")" 2>/dev/null || true
+    fi
+
+    run_step "Download & install official Valve Steam Launcher & Google Chrome" "
+        rm -f /tmp/steam.deb /tmp/chrome.deb
+        wget -q --retry-connrefused --tries=3 -O /tmp/steam.deb '$STEAM_DEB_URL'
+        wget -q --retry-connrefused --tries=3 -O /tmp/chrome.deb '$CHROME_DEB_URL'
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove /tmp/steam.deb /tmp/chrome.deb
+        sudo rm -f /etc/apt/sources.list.d/steam*.list /tmp/steam.deb /tmp/chrome.deb
+        sudo ln -sf /bin/true /usr/bin/steamdeps
+    " || return 1
+
+    # Optional Heroic Games Launcher (Epic / GOG / Amazon)
+    if ! command -v heroic >/dev/null 2>&1; then
+        run_step "Install Heroic Games Launcher (Epic/GOG)" "
+            rm -f /tmp/heroic.deb
+            wget -q --retry-connrefused --tries=2 -O /tmp/heroic.deb '$HEROIC_DEB_URL' && \
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove /tmp/heroic.deb
+            rm -f /tmp/heroic.deb
+        " || log_warn "Optional Heroic launcher skipped; continuing."
+    fi
+
+    printf 'allowed_users=anybody\nneeds_root_rights=yes\n' | sudo tee /etc/X11/Xwrapper.config >/dev/null
+    mark_done "packages_installed"
+}
+
 install_matching_nvidia_driver() {
-    if already_done "nvidia_driver_installed" && [ -f /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so ] && nvidia-smi >/dev/null 2>&1; then
-        log_info "NVIDIA Xorg/userspace driver already installed, skipping."
+    local xorg_drv="/usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so"
+    if already_done "nvidia_driver_installed" && [ -f "$xorg_drv" ] && nvidia-smi >/dev/null 2>&1; then
+        log_info "NVIDIA Xorg & 32/64-bit userspace libraries already configured, skipping."
         return 0
     fi
 
@@ -173,94 +290,153 @@ install_matching_nvidia_driver() {
         return 1
     fi
 
-    log_info "Detected Colab host NVIDIA kernel module version: $host_ver"
+    local major="${host_ver%%.*}"
+    log_info "Detected Colab host NVIDIA kernel module version: $host_ver (series $major)"
 
-    if [ -f /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so ] && strings /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so 2>/dev/null | grep -qF "$host_ver"; then
-        log_info "Existing nvidia_drv.so already matches $host_ver!"
-        mark_done "nvidia_driver_installed"
-        return 0
-    fi
-
-    local installer="/bakdeb/NVIDIA-Linux-x86_64-${host_ver}.run"
-    if [ ! -f "$installer" ]; then
-        log_warn "Bundled NVIDIA installer (580.82.07) differs from host kernel ($host_ver). Downloading matching NVIDIA-$host_ver.run..."
-        installer="/tmp/NVIDIA-Linux-x86_64-${host_ver}.run"
-        local dl_ok="false"
-        for nv_url in \
-            "https://us.download.nvidia.com/tesla/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
-            "https://download.nvidia.com/tesla/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
-            "https://us.download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
-            "https://download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run"
-        do
-            if wget -q --retry-connrefused --tries=2 -O "$installer" "$nv_url"; then
-                if [ -s "$installer" ]; then
-                    dl_ok="true"
-                    log_info "Downloaded matching NVIDIA driver ($host_ver) from $nv_url"
-                    break
-                fi
-            fi
-            rm -f "$installer"
-        done
-
-        if [ "$dl_ok" != "true" ]; then
-            log_warn "Exact NVIDIA-$host_ver.run archive not found; falling back to bundled /bakdeb/NVIDIA*.run..."
-            installer=$(ls /bakdeb/NVIDIA*.run 2>/dev/null | head -n 1 || true)
-            if [ -z "$installer" ] || [ ! -f "$installer" ]; then
-                log_err "No NVIDIA installer available!"
-                return 1
-            fi
+    local installer="/tmp/NVIDIA-Linux-x86_64-${host_ver}.run"
+    local dl_ok="false"
+    for nv_url in \
+        "https://us.download.nvidia.com/tesla/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
+        "https://download.nvidia.com/tesla/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
+        "https://us.download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run" \
+        "https://download.nvidia.com/XFree86/Linux-x86_64/${host_ver}/NVIDIA-Linux-x86_64-${host_ver}.run"
+    do
+        if wget -q --retry-connrefused --tries=2 -O "$installer" "$nv_url" && [ -s "$installer" ]; then
+            dl_ok="true"
+            log_info "Downloaded exact NVIDIA driver archive ($host_ver)"
+            break
         fi
-    fi
+        rm -f "$installer"
+    done
 
-    chmod +x "$installer"
-    log_info "Installing NVIDIA userspace & Xorg driver ($installer)..."
-    echo "=== Installing NVIDIA driver ($installer) ===" >> "$LOG_FILE"
-    sudo "$installer" --silent --no-kernel-module --install-compat32-libs --no-nouveau-check --no-nvidia-modprobe --no-backup >> "$LOG_FILE" 2>&1 || \
-    (echo 1 | sudo "$installer" --no-kernel-module --ui=none --no-questions >> "$LOG_FILE" 2>&1) || true
+    if [ "$dl_ok" = "true" ]; then
+        chmod +x "$installer"
+        run_step "Unpack & configure container-safe NVIDIA Xorg, NVENC & 32/64-bit GL/Vulkan ($host_ver)" "
+            sudo rm -rf /tmp/nv_extract
+            sudo '$installer' --extract-only --target /tmp/nv_extract
+            sudo mkdir -p /usr/lib/x86_64-linux-gnu/xorg/modules/drivers \
+                          /usr/lib/x86_64-linux-gnu/xorg/modules/extensions \
+                          /usr/local/lib/nvidia64 \
+                          /usr/local/lib/nvidia32 \
+                          /usr/share/glvnd/egl_vendor.d \
+                          /etc/vulkan/icd.d
 
-    # If container bind-mounts prevented full nvidia-installer completion, manually extract Xorg modules so Xorg :1 works!
-    if [ ! -f /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so ]; then
-        log_warn "nvidia_drv.so not placed by standard installer; extracting Xorg modules directly from .run package..."
-        sudo rm -rf /tmp/nv_extract
-        sudo "$installer" --extract-only --target /tmp/nv_extract >> "$LOG_FILE" 2>&1 || true
-        if [ -f /tmp/nv_extract/nvidia_drv.so ]; then
-            sudo mkdir -p /usr/lib/x86_64-linux-gnu/xorg/modules/drivers /usr/lib/x86_64-linux-gnu/xorg/modules/extensions
-            sudo cp -f /tmp/nv_extract/nvidia_drv.so /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/
-            if [ -f "/tmp/nv_extract/libglxserver_nvidia.so.${host_ver}" ]; then
-                sudo cp -f "/tmp/nv_extract/libglxserver_nvidia.so.${host_ver}" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/
-                sudo ln -sf "libglxserver_nvidia.so.${host_ver}" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so
-                sudo ln -sf "libglxserver_nvidia.so.${host_ver}" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so.1
-            elif ls /tmp/nv_extract/libglxserver_nvidia.so.* >/dev/null 2>&1; then
-                local glx_so
-                glx_so=$(ls /tmp/nv_extract/libglxserver_nvidia.so.* | head -n 1)
-                sudo cp -f "$glx_so" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/
-                sudo ln -sf "$(basename "$glx_so")" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so
-                sudo ln -sf "$(basename "$glx_so")" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so.1
+            nv_drv=\$(find /tmp/nv_extract -maxdepth 2 -name 'nvidia_drv.so' -print -quit)
+            if [ -n \"\$nv_drv\" ]; then
+                sudo cp -f \"\$nv_drv\" /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so
             fi
-            [ -f /tmp/nv_extract/nvidia-xconfig ] && sudo cp -f /tmp/nv_extract/nvidia-xconfig /usr/bin/ && sudo chmod +x /usr/bin/nvidia-xconfig
-        fi
-        sudo rm -rf /tmp/nv_extract
+
+            glx_so=\$(find /tmp/nv_extract -maxdepth 2 -name 'libglxserver_nvidia.so.*' -print -quit)
+            if [ -n \"\$glx_so\" ]; then
+                base_glx=\$(basename \"\$glx_so\")
+                sudo cp -f \"\$glx_so\" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/
+                sudo ln -sf \"\$base_glx\" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so
+                sudo ln -sf \"\$base_glx\" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so.1
+            fi
+
+            nv_xcfg=\$(find /tmp/nv_extract -maxdepth 2 -name 'nvidia-xconfig' -type f -print -quit)
+            if [ -n \"\$nv_xcfg\" ]; then
+                sudo cp -f \"\$nv_xcfg\" /usr/local/bin/nvidia-xconfig
+                sudo chmod +x /usr/local/bin/nvidia-xconfig
+            fi
+
+            find /tmp/nv_extract -maxdepth 1 -type f -name '*.so.*' ! -name 'libglxserver_nvidia*' -exec sudo cp -f {} /usr/local/lib/nvidia64/ \;
+            if [ -d /tmp/nv_extract/32 ]; then
+                find /tmp/nv_extract/32 -maxdepth 2 -type f -name '*.so.*' -exec sudo cp -f {} /usr/local/lib/nvidia32/ \;
+            fi
+
+            sudo rm -rf /tmp/nv_extract '$installer'
+        " || return 1
+    else
+        log_warn "Exact NVIDIA-$host_ver.run archive unavailable; installing Ubuntu nvidia-$major packages..."
+        run_step "Install Ubuntu xserver-xorg-video-nvidia-${major} & NVENC/GL libraries" \
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove xserver-xorg-video-nvidia-${major} libnvidia-gl-${major} libnvidia-gl-${major}:i386 libnvidia-encode-${major} nvidia-utils-${major}" || return 1
     fi
 
-    # Clean up downloaded /tmp installer to save Colab disk space
-    [[ "$installer" == /tmp/* ]] && rm -f "$installer"
+    sudo tee /usr/share/glvnd/egl_vendor.d/10_nvidia.json >/dev/null <<'EOF'
+{
+    "file_format_version" : "1.0.0",
+    "ICD" : {
+        "library_path" : "libEGL_nvidia.so.0"
+    }
+}
+EOF
 
-    if [ ! -f /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so ]; then
-        log_err "Failed to install nvidia_drv.so! Tail of /var/log/nvidia-installer.log:"
-        tail -n 30 /var/log/nvidia-installer.log 2>/dev/null || true
+    sudo tee /etc/vulkan/icd.d/nvidia_icd.json >/dev/null <<'EOF'
+{
+    "file_format_version" : "1.0.0",
+    "ICD": {
+        "library_path": "libGLX_nvidia.so.0",
+        "api_version" : "1.3"
+    }
+}
+EOF
+
+    printf "/usr/lib64-nvidia\n/usr/local/lib/nvidia64\n/usr/local/lib/nvidia32\n" | sudo tee /etc/ld.so.conf.d/99-colabgg-nvidia.conf >/dev/null
+    sudo ldconfig
+    sudo chmod 666 /dev/nvidia* /dev/dri/* 2>/dev/null || true
+
+    if [ ! -f "$xorg_drv" ]; then
+        log_err "nvidia_drv.so was not installed at $xorg_drv!"
         return 1
     fi
 
     mark_done "nvidia_driver_installed"
 }
 
-setup_cpu_dummy_display() {
-    if ! already_done "cpu_dummy_installed"; then
-        run_step "Install CPU virtual display driver (xserver-xorg-video-dummy & Mesa)" \
-            "sudo apt-get update -y && sudo apt-get install -y xserver-xorg-video-dummy libgl1-mesa-dri libglx-mesa0 mesa-vulkan-drivers" || return 1
-        mark_done "cpu_dummy_installed"
+write_nvidia_xorg_conf() {
+    local headless_none="${1:-false}"
+    if command -v nvidia-xconfig >/dev/null 2>&1; then
+        if [ "$headless_none" = "true" ]; then
+            sudo nvidia-xconfig -a --allow-empty-initial-configuration --use-display-device=None --virtual=1920x1080 --preserve-busid >> "$LOG_FILE" 2>&1 && return 0
+        else
+            sudo nvidia-xconfig -a --allow-empty-initial-configuration --virtual=1920x1080 --preserve-busid >> "$LOG_FILE" 2>&1 && return 0
+        fi
     fi
 
+    # Fallback pure-Python PCI BusID xorg.conf generator
+    sudo python3 - "$headless_none" <<'PYXORG'
+import pathlib, re, subprocess, sys
+use_none = sys.argv[1] == "true"
+raw = subprocess.check_output(["nvidia-smi", "--query-gpu=gpu_bus_id", "--format=csv,noheader"], text=True).splitlines()[0].strip()
+m = re.search(r"([0-9a-fA-F]+):([0-9a-fA-F]+)\.([0-9a-fA-F]+)$", raw)
+bus_id = f"PCI:{int(m.group(1), 16)}:{int(m.group(2), 16)}:{int(m.group(3), 16)}" if m else "PCI:0:4:0"
+extra = '    Option         "UseDisplayDevice" "None"\n' if use_none else ""
+conf = f'''Section "ServerLayout"
+    Identifier     "Layout0"
+    Screen      0  "Screen0" 0 0
+EndSection
+
+Section "Monitor"
+    Identifier     "Monitor0"
+    HorizSync       28.0 - 80.0
+    VertRefresh     43.0 - 75.0
+EndSection
+
+Section "Device"
+    Identifier     "Device0"
+    Driver         "nvidia"
+    VendorName     "NVIDIA Corporation"
+    BusID          "{bus_id}"
+    Option         "AllowEmptyInitialConfiguration" "True"
+{extra}EndSection
+
+Section "Screen"
+    Identifier     "Screen0"
+    Device         "Device0"
+    Monitor        "Monitor0"
+    DefaultDepth    24
+    SubSection     "Display"
+        Depth       24
+        Virtual     1920 1080
+    EndSubSection
+EndSection
+'''
+pathlib.Path("/etc/X11/xorg.conf").write_text(conf, encoding="utf-8")
+PYXORG
+}
+
+setup_cpu_dummy_display() {
     sudo tee /etc/X11/xorg.conf >/dev/null <<'XORGEOF'
 Section "Device"
     Identifier  "Configured Video Device"
@@ -292,28 +468,52 @@ XORGEOF
 configure_sunshine_encoder() {
     local has_gpu="$1"
     local conf="/home/user/.config/sunshine/sunshine.conf"
+    local apps="/home/user/.config/sunshine/apps.json"
     sudo mkdir -p /home/user/.config/sunshine
     sudo touch "$conf"
 
-    # Strip previous auto-managed CPU block so restoring a CPU backup onto a T4 GPU uses NVENC!
-    sudo python3 - "$conf" "$has_gpu" <<'PYSUN'
-import pathlib, re, sys
+    sudo python3 - "$conf" "$apps" "$has_gpu" <<'PYSUN'
+import json, pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
-has_gpu = sys.argv[2] == "true"
+apps_p = pathlib.Path(sys.argv[2])
+has_gpu = sys.argv[3] == "true"
+
 txt = p.read_text(encoding="utf-8", errors="ignore")
+txt = re.sub(r"\n?# COLABGG_AUTO_START.*?# COLABGG_AUTO_END\n?", "\n", txt, flags=re.S)
 txt = re.sub(r"\n?# COLABGG_CPU_MODE_START.*?# COLABGG_CPU_MODE_END\n?", "\n", txt, flags=re.S).strip()
+
+lines = [
+    "# COLABGG_AUTO_START",
+    "sunshine_name = ColabGG Cloud Gaming",
+    "capture = x11",
+    "audio_sink = sunshine_sink",
+    "upnp = disabled",
+    "system_tray = disabled",
+    "notify_pre_releases = disabled",
+]
 if not has_gpu:
-    block = (
-        "# COLABGG_CPU_MODE_START\n"
-        "capture = x11\n"
-        "encoder = software\n"
-        "sw_preset = ultrafast\n"
-        "# COLABGG_CPU_MODE_END\n"
-    )
-    txt = (txt + "\n\n" + block).lstrip()
-else:
-    txt = txt + ("\n" if txt else "")
+    lines.extend([
+        "encoder = software",
+        "sw_preset = ultrafast",
+    ])
+lines.append("# COLABGG_AUTO_END")
+block = "\n".join(lines) + "\n"
+txt = (txt + "\n\n" + block).lstrip()
 p.write_text(txt, encoding="utf-8")
+
+if not apps_p.exists():
+    apps_data = {
+        "env": {"PATH": "$(PATH):$(HOME)/.local/bin:/usr/games:/usr/local/bin"},
+        "apps": [
+            {"name": "Desktop", "image-path": "desktop.png"},
+            {
+                "name": "Steam Big Picture",
+                "detached": ["setsid steam steam://open/bigpicture"],
+                "image-path": "steam.png",
+            },
+        ],
+    }
+    apps_p.write_text(json.dumps(apps_data, indent=2) + "\n", encoding="utf-8")
 PYSUN
     sudo chown -R user:user /home/user/.config/sunshine
 }
@@ -341,6 +541,9 @@ main() {
     echo "   ColabGG Cloud Gaming — Auto GPU (NVENC) / CPU Fallback Edition"
     echo "======================================================================"
 
+    # Enlarge /dev/shm when allowed so Steam Chromium UI & X11 MIT-SHM never OOM
+    sudo mount -o remount,size=4G /dev/shm 2>/dev/null || true
+
     local has_gpu="false"
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
         has_gpu="true"
@@ -350,34 +553,14 @@ main() {
         log_warn "(Ideal for downloading/installing Steam games & backing up to Drive without using GPU quota)"
     fi
 
-    # 1. Base CLI utilities
-    local missing_pkgs=()
-    for bin_pkg in "wget:wget" "curl:curl" "pigz:pigz" "unzip:unzip" "jq:jq" "lspci:pciutils" "fuser:psmisc"; do
-        local bin="${bin_pkg%%:*}"
-        local pkg="${bin_pkg##*:}"
-        if ! command -v "$bin" >/dev/null 2>&1; then
-            missing_pkgs+=("$pkg")
-        fi
-    done
-    if [ "${#missing_pkgs[@]}" -gt 0 ]; then
-        run_step "Install base prerequisite utilities (${missing_pkgs[*]})" \
-            "sudo apt-get update -y && sudo apt-get install -y ${missing_pkgs[*]}" || exit 1
-    fi
-
-    # 2. Safe /etc/profile.d/custom_path.sh
-    printf '#!/bin/sh\nexport PATH="$PATH:/usr/games:/usr/lib/games"\n' | sudo tee /etc/profile.d/custom_path.sh >/dev/null
+    # 1. Safe /etc/profile.d/custom_path.sh
+    printf '#!/bin/sh\nexport PATH="$PATH:/usr/local/bin:/usr/games:/usr/lib/games"\n' | sudo tee /etc/profile.d/custom_path.sh >/dev/null
     sudo chmod 0755 /etc/profile.d/custom_path.sh
 
-    # 3. Extract /bakdeb bundle once
-    if [ ! -d /bakdeb ] || ! already_done "tar_extracted"; then
-        run_step "Download & extract gaming package bundle (~855 MB)" \
-            "(wget -qO- --retry-connrefused --tries=3 --max-redirect=10 '$PACKAGES_URL' || wget -qO- --no-check-certificate --max-redirect=10 '$PACKAGES_FALLBACK_URL') | pigz -dc | sudo tar -xf - -C /" || exit 1
-        mark_done "tar_extracted"
-    else
-        log_info "Package bundle (/bakdeb) already extracted, skipping download."
-    fi
+    # 2. Install native Ubuntu 24.04/22.04 packages + Sunshine + Steam + Chrome
+    install_native_gaming_packages || exit 1
 
-    # 4. User setup & optional Google Drive backup restore
+    # 3. User setup & optional Google Drive backup restore
     setup_linux_user
     if [ -f /content/drive/MyDrive/backup.tar.gz ]; then
         local do_restore="n"
@@ -393,27 +576,16 @@ main() {
         fi
     fi
 
-    # 5. Install desktop/gaming .deb packages
-    if ! already_done "packages_installed"; then
-        run_step "Enable i386 multiarch & install desktop/gaming packages" \
-            "sudo dpkg --add-architecture i386 && (sudo DEBIAN_FRONTEND=noninteractive dpkg -i /bakdeb/*.deb || true) && sudo DEBIAN_FRONTEND=noninteractive apt-get install --fix-broken -y -o Dir::Cache::archives='/bakdeb'" || \
-        run_step "Update apt cache & repair missing dependencies" \
-            "sudo apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install --fix-broken -y" || exit 1
-        mark_done "packages_installed"
-    else
-        log_info "Desktop & gaming packages already installed, skipping."
-    fi
-
-    # 6. Configure Display Driver (NVIDIA GPU vs CPU Dummy Xorg)
+    # 4. Configure Display Driver (NVIDIA GPU vs CPU Dummy Xorg)
     if [ "$has_gpu" = "true" ]; then
         install_matching_nvidia_driver || exit 1
-        run_step "Configure virtual 1920x1080 NVIDIA Xorg screen" \
-            "sudo nvidia-xconfig -a --allow-empty-initial-configuration --virtual=1920x1080 --preserve-busid" || true
+        log_info "Configuring virtual 1920x1080 NVIDIA Xorg screen..."
+        write_nvidia_xorg_conf "false"
     else
         setup_cpu_dummy_display || exit 1
     fi
 
-    # 7. Start Xorg display (:1)
+    # 5. Start Xorg display (:1)
     if ! pgrep -f "Xorg :1" >/dev/null 2>&1; then
         sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
         log_info "Starting Xorg server on DISPLAY=:1 ..."
@@ -425,12 +597,13 @@ main() {
             sleep 1
         done
 
-        # Headless datacenter Tesla GPUs (0 display heads) sometimes require --use-display-device=None
+        # Headless datacenter Tesla/L4/A100 GPUs (0 display heads) sometimes require UseDisplayDevice=None
         if ! DISPLAY=:1 xrandr >/dev/null 2>&1 && [ "$has_gpu" = "true" ]; then
-            log_warn "Retrying Xorg :1 with headless --use-display-device=None config..."
+            log_warn "Retrying Xorg :1 with headless UseDisplayDevice=None config..."
             sudo pkill -f "Xorg :1" >/dev/null 2>&1 || true
+            sleep 1
             sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
-            sudo nvidia-xconfig -a --allow-empty-initial-configuration --use-display-device=None --virtual=1920x1080 --preserve-busid >> "$LOG_FILE" 2>&1 || true
+            write_nvidia_xorg_conf "true"
             sudo nohup Xorg :1 -config /etc/X11/xorg.conf -seat seat-1 -novtswitch -nolisten tcp -noreset >/tmp/xorg.log 2>&1 &
             for _ in $(seq 1 10); do
                 if DISPLAY=:1 xrandr >/dev/null 2>&1; then
@@ -443,7 +616,7 @@ main() {
 
     if ! DISPLAY=:1 xrandr >/dev/null 2>&1; then
         log_err "Xorg :1 failed to start! Check /tmp/xorg.log:"
-        tail -n 30 /tmp/xorg.log || true
+        tail -n 35 /tmp/xorg.log || true
         exit 1
     fi
 
@@ -460,9 +633,7 @@ main() {
         fi
     fi
 
-    # 8. Start PulseAudio (virtual sink), Openbox, Sunshine, Steam, Heroic, Chrome
-    [ -f /bakdeb/nvidia-wallpaper.jpg ] && sudo cp -f /bakdeb/nvidia-wallpaper.jpg /home/user/nvidia-wallpaper.jpg && sudo chown user:user /home/user/nvidia-wallpaper.jpg
-
+    # 6. Start PulseAudio (virtual sink), Openbox, Sunshine, Steam, Heroic, Chrome
     configure_sunshine_encoder "$has_gpu"
 
     log_info "Starting PulseAudio, Openbox, Sunshine, Steam & desktop tools..."
@@ -472,10 +643,19 @@ main() {
 
     pgrep -u user -x openbox >/dev/null 2>&1 || su - user -c 'DISPLAY=:1 nohup openbox >/tmp/openbox.log 2>&1 &'
     sleep 1
-    [ -f /home/user/nvidia-wallpaper.jpg ] && su - user -c 'DISPLAY=:1 feh --bg-scale ~/nvidia-wallpaper.jpg >/dev/null 2>&1 || true'
+    if [ -f /home/user/nvidia-wallpaper.jpg ]; then
+        su - user -c 'DISPLAY=:1 feh --bg-scale ~/nvidia-wallpaper.jpg >/dev/null 2>&1 || true'
+    elif [ -f /home/user/colabgg-wallpaper.png ]; then
+        su - user -c 'DISPLAY=:1 feh --bg-scale ~/colabgg-wallpaper.png >/dev/null 2>&1 || true'
+    else
+        DISPLAY=:1 xsetroot -solid "#0f172a" >/dev/null 2>&1 || true
+    fi
 
     pkill -u user -x sunshine >/dev/null 2>&1 || true
     sleep 1
+    if ! su - user -c "sunshine --version" >/dev/null 2>&1; then
+        sudo setcap -r "$(readlink -f "$(command -v sunshine)")" 2>/dev/null || true
+    fi
     su - user -c "sunshine --creds '$SUNSHINE_USER' '$SUNSHINE_PASS'" >/dev/null 2>&1 || true
     su - user -c 'DISPLAY=:1 nohup sunshine >/tmp/sunshine.log 2>&1 &'
 
@@ -489,7 +669,7 @@ main() {
         su - user -c 'DISPLAY=:1 nohup google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run https://store.steampowered.com >/tmp/chrome.log 2>&1 &' || true
     fi
 
-    # 9. Install, patch, and launch Moonlight Web Remote (:8081)
+    # 7. Install, patch, and launch Moonlight Web Remote (:8081)
     if [ ! -x /opt/moonlight-web/package/web-server ]; then
         run_step "Download & unpack Moonlight Web Remote" \
             "sudo rm -rf /opt/moonlight-web && (wget -q --retry-connrefused --tries=3 -O /tmp/colab-linux.zip -L '$MOONWEB_ZIP_URL' || wget --no-check-certificate -q -O /tmp/colab-linux.zip -L '$MOONWEB_FALLBACK_URL') && sudo unzip -qo /tmp/colab-linux.zip -d /opt/moonlight-web && rm -f /tmp/colab-linux.zip && sudo chmod +x /opt/moonlight-web/package/web-server /opt/moonlight-web/package/streamer" || exit 1
@@ -515,7 +695,7 @@ if d.exists():
     log_info "Starting local Moonlight Web Server on 0.0.0.0:8081 ..."
     (cd /opt/moonlight-web/package && nohup ./web-server --bind-address 0.0.0.0:8081 >/tmp/webserver.log 2>&1 &)
 
-    # 10. Auto-pair Moonlight Web (127.0.0.1) with Sunshine (:47990)
+    # 8. Auto-pair Moonlight Web (127.0.0.1) with Sunshine (:47990)
     if [ "$AUTO_PAIR" = "true" ]; then
         log_info "Auto-pairing local Moonlight Web with Sunshine..."
         WEB_USER="$WEB_USER" WEB_PASS="$WEB_PASS" SUNSHINE_USER="$SUNSHINE_USER" SUNSHINE_PASS="$SUNSHINE_PASS" python3 - --auto <<'PYAUTOPAIR' || log_warn "Auto-pair warning; can re-run moon-pair.sh"
@@ -540,24 +720,44 @@ ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
 
-def sunshine_req(path, payload):
+def sunshine_req(path, method="GET", payload=None, extra_headers=None):
     auth = base64.b64encode(f"{SUN_USER}:{SUN_PASS}".encode()).decode()
-    data = json.dumps(payload).encode("utf-8")
+    headers = {"Authorization": f"Basic {auth}"}
+    if extra_headers:
+        headers.update(extra_headers)
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{SUNSHINE_BASE}{path}",
         data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Basic {auth}",
-        },
+        method=method,
+        headers=headers,
     )
     with urllib.request.urlopen(req, context=ssl_ctx, timeout=15) as resp:
-        return resp.status, resp.read().decode("utf-8", errors="replace")
+        raw_cookies = resp.headers.get_all("Set-Cookie") or []
+        cookie = "; ".join(c.split(";", 1)[0] for c in raw_cookies if "=" in c)
+        return resp.status, resp.read().decode("utf-8", errors="replace"), cookie
+
+
+def get_sunshine_csrf_headers():
+    headers = {}
+    try:
+        _, body, cookie = sunshine_req("/csrf-token", method="GET")
+        if cookie:
+            headers["Cookie"] = cookie
+        obj = json.loads(body)
+        tok = obj.get("csrf_token") or obj.get("token") or ""
+        if tok:
+            headers["X-CSRF-Token"] = tok
+    except Exception:
+        pass
+    return headers
 
 
 def ensure_sunshine_ready():
-    for _ in range(25):
+    for _ in range(30):
         try:
             req = urllib.request.Request(SUNSHINE_BASE.replace("/api", "/"), method="GET")
             urllib.request.urlopen(req, context=ssl_ctx, timeout=3)
@@ -567,18 +767,69 @@ def ensure_sunshine_ready():
         except Exception:
             time.sleep(1)
     try:
+        csrf_hdrs = get_sunshine_csrf_headers()
         sunshine_req(
             "/password",
-            {
+            method="POST",
+            payload={
                 "currentUsername": SUN_USER,
                 "currentPassword": SUN_PASS,
                 "newUsername": SUN_USER,
                 "newPassword": SUN_PASS,
                 "confirmNewPassword": SUN_PASS,
             },
+            extra_headers=csrf_hdrs,
         )
     except Exception:
         pass
+
+
+def submit_sunshine_pin(pin, client_name="moonlight-web"):
+    csrf_hdrs = get_sunshine_csrf_headers()
+    supports_pairing_list = False
+    for _ in range(18):
+        try:
+            _, body, _ = sunshine_req("/pin", method="GET", extra_headers=csrf_hdrs)
+            data = json.loads(body)
+            if isinstance(data, dict) and "pairings" in data:
+                supports_pairing_list = True
+                pairings = data.get("pairings") or []
+                if pairings:
+                    last_status, last_body = 200, body
+                    for item in pairings:
+                        pid = item.get("id") or item.get("pairing_id") or ""
+                        payload = {"pin": pin, "name": client_name}
+                        if pid:
+                            payload["pairing_id"] = pid
+                        last_status, last_body, _ = sunshine_req(
+                            "/pin",
+                            method="POST",
+                            payload=payload,
+                            extra_headers=csrf_hdrs,
+                        )
+                        try:
+                            if json.loads(last_body).get("status") is True:
+                                return last_status, last_body
+                        except Exception:
+                            return last_status, last_body
+                    return last_status, last_body
+                time.sleep(0.35)
+                continue
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 405):
+                break
+            time.sleep(0.35)
+        except Exception:
+            break
+
+    status, body, _ = sunshine_req(
+        "/pin",
+        method="POST",
+        payload={"pin": pin, "name": client_name},
+        extra_headers=csrf_hdrs,
+    )
+    return status, body
 
 
 def web_req(path, method="GET", payload=None, cookie="", timeout=15):
@@ -594,7 +845,7 @@ def web_req(path, method="GET", payload=None, cookie="", timeout=15):
 
 
 def login_moonweb():
-    for _ in range(20):
+    for _ in range(25):
         try:
             resp = web_req("/login", method="POST", payload={"name": WEB_USER, "password": WEB_PASS})
             raw_cookies = resp.headers.get_all("Set-Cookie") or []
@@ -615,7 +866,7 @@ def main():
 
     if mode != "--auto":
         pin = mode.strip()
-        status, body = sunshine_req("/pin", {"pin": pin, "name": "moonlight"})
+        status, body = submit_sunshine_pin(pin, "moonlight")
         print(f"Sunshine PIN response ({status}): {body}")
         return 0
 
@@ -676,7 +927,7 @@ def main():
 
     pin = stage1["Pin"]
     print(f"[Auto-Pair] Generated Moonlight PIN: {pin} -> Submitting to Sunshine...")
-    sunshine_req("/pin", {"pin": pin, "name": "moonlight-web"})
+    submit_sunshine_pin(pin, "moonlight-web")
 
     stage2_raw = pair_resp.readline().decode("utf-8").strip()
     pair_resp.close()
@@ -700,7 +951,7 @@ PYAUTOPAIR
         return 0
     fi
 
-    # 11. Optional Cloudflare Zero Trust Named Tunnel
+    # 9. Optional Cloudflare Zero Trust Named Tunnel
     if [ -n "$CF_TUNNEL_TOKEN" ]; then
         if [ ! -x /usr/local/bin/cloudflared ]; then
             run_step "Install cloudflared binary" \
@@ -710,7 +961,7 @@ PYAUTOPAIR
         nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol quic run --token "$CF_TUNNEL_TOKEN" >/tmp/cf_zerotrust.log 2>&1 &
     fi
 
-    # 12. Primary Connection Mode: VaultBox-style Cloudflare Relay Room OR Legacy Quick Tunnel
+    # 10. Primary Connection Mode: VaultBox-style Cloudflare Relay Room OR Legacy Quick Tunnel
     if [ -n "$COLABGG_RELAY_URL" ] && [ -n "$COLABGG_ROOM_ID" ] && [ -n "$COLABGG_TOKEN" ]; then
         run_step "Install Python websockets client for ColabGG Relay" \
             "python3 -m pip install -q websockets" || exit 1
