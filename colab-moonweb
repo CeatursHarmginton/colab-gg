@@ -15,6 +15,8 @@ if [ ! -d "/content" ] && [ "${FORCE_LINUX:-0}" != "1" ]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_SUSPEND=1
+export NEEDRESTART_MODE=l
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/lib/games:$PATH"
 
 STATE_FILE="/var/tmp/colab_gpu_setup.done"
@@ -209,9 +211,9 @@ install_native_gaming_packages() {
         "sudo dpkg --add-architecture i386 && sudo apt-get update -y" || return 1
 
     run_step "Install native Ubuntu Xorg, Openbox, PulseAudio & 32/64-bit Vulkan/OpenGL libraries" \
-        "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove \
+        "sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' \
             wget curl pigz unzip jq pciutils psmisc ca-certificates file xz-utils lsof kmod libcap2-bin \
-            xorg xserver-xorg-core xserver-xorg-input-all xserver-xorg-video-dummy x11-xserver-utils x11-utils xauth dbus-x11 \
+            xserver-xorg xserver-xorg-core xserver-xorg-input-all xserver-xorg-video-dummy xinit x11-xserver-utils x11-utils xauth dbus-x11 \
             openbox pulseaudio pulseaudio-utils alsa-utils feh xvkbd thunar xterm zenity \
             libnss3 python3-apt xdg-user-dirs xdg-utils xdg-desktop-portal xdg-desktop-portal-gtk \
             mesa-utils vulkan-tools libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 libgbm1 libvulkan1 mesa-vulkan-drivers \
@@ -239,7 +241,7 @@ install_native_gaming_packages() {
             ver=\"\${tag#v}\"
             wget -q --retry-connrefused --tries=3 -O /tmp/sunshine.deb \"https://github.com/SunshineStream/Sunshine/releases/download/\${tag}/sunshine_\${ver}-1%2Bubuntu${ubu_ver}_amd64.deb\"
         fi
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove /tmp/sunshine.deb
+        sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' /tmp/sunshine.deb
         rm -f /tmp/sunshine.deb
     " || return 1
 
@@ -252,7 +254,7 @@ install_native_gaming_packages() {
         rm -f /tmp/steam.deb /tmp/chrome.deb
         wget -q --retry-connrefused --tries=3 -O /tmp/steam.deb '$STEAM_DEB_URL'
         wget -q --retry-connrefused --tries=3 -O /tmp/chrome.deb '$CHROME_DEB_URL'
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove /tmp/steam.deb /tmp/chrome.deb
+        sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' /tmp/steam.deb /tmp/chrome.deb
         sudo rm -f /etc/apt/sources.list.d/steam*.list /tmp/steam.deb /tmp/chrome.deb
         sudo ln -sf /bin/true /usr/bin/steamdeps
     " || return 1
@@ -262,7 +264,7 @@ install_native_gaming_packages() {
         run_step "Install Heroic Games Launcher (Epic/GOG)" "
             rm -f /tmp/heroic.deb
             wget -q --retry-connrefused --tries=2 -O /tmp/heroic.deb '$HEROIC_DEB_URL' && \
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove /tmp/heroic.deb
+            sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' /tmp/heroic.deb
             rm -f /tmp/heroic.deb
         " || log_warn "Optional Heroic launcher skipped; continuing."
     fi
@@ -350,7 +352,7 @@ install_matching_nvidia_driver() {
     else
         log_warn "Exact NVIDIA-$host_ver.run archive unavailable; installing Ubuntu nvidia-$major packages..."
         run_step "Install Ubuntu xserver-xorg-video-nvidia-${major} & NVENC/GL libraries" \
-            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove xserver-xorg-video-nvidia-${major} libnvidia-gl-${major} libnvidia-gl-${major}:i386 libnvidia-encode-${major} nvidia-utils-${major}" || return 1
+            "sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' xserver-xorg-video-nvidia-${major} libnvidia-gl-${major} libnvidia-gl-${major}:i386 libnvidia-encode-${major} nvidia-utils-${major}" || return 1
     fi
 
     sudo tee /usr/share/glvnd/egl_vendor.d/10_nvidia.json >/dev/null <<'EOF'
