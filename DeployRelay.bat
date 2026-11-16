@@ -45,7 +45,7 @@ if errorlevel 1 (
 echo.
 echo ====================================================================
 echo   [OK] Deploy thanh cong!
-echo   - Web Client URL : https://colabgg-relay.lefantasusdelimei.workers.dev
+echo   - Web Client URL : https://colabgg-relay.baocryptonft.workers.dev
 echo   - (Tuy chon) Chay SetupTurnSecrets.bat de kich hoat Cloudflare TURN UDP 1TB/thang!
 echo ====================================================================
 pause

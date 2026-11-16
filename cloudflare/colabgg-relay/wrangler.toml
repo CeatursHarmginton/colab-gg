@@ -1,8 +1,9 @@
 name = "colabgg-relay"
 main = "worker.js"
 compatibility_date = "2024-09-23"
-account_id = "f0c646c5607363168a28288df7ccc141"
+account_id = "0660e593dd3ed8ef5df1ba5431bfe8e4"
 workers_dev = true
+preview_urls = false
 
 [assets]
 directory = "./public"

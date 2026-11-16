@@ -25,7 +25,7 @@ Biến máy ảo **Google Colab (NVIDIA T4 GPU)** thành máy chủ Cloud Gaming
 
 1. Mở [Google Colab](https://colab.research.google.com) → **Upload** file **[`ColabSteam.ipynb`](ColabSteam.ipynb)**.
 2. Chọn GPU: **Runtime → Change runtime type → T4 GPU** → **Save**.
-3. Điền URL Worker của bạn vào ô `Relay_Server_URL` (mặc định đã điền sẵn `https://colabgg-relay.lefantasusdelimei.workers.dev`) rồi bấm **Run**.
+3. Điền URL Worker của bạn vào ô `Relay_Server_URL` (mặc định đã điền sẵn `https://colabgg-relay.baocryptonft.workers.dev`) rồi bấm **Run**.
 4. Sau ~3–5 phút cài đặt, thẻ **ColabGG Cloud Gaming Server is Ready** hiện ra:
    - Bấm thẳng nút **🚀 Mở Web Client & Kết nối ngay**, **HOẶC**
    - Chạy **[`OpenWebClient.bat`](OpenWebClient.bat)** / mở link Worker trên bất kỳ trình duyệt nào → bấm **📋 Dán từ Clipboard** → bấm **🖥️ Vào thẳng Màn hình Desktop (1-Click)**!
