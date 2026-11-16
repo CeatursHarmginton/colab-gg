@@ -59,6 +59,7 @@ function startApp() {
         const app = new ViewerApp(api, hostId, appId, bootstrapRole.role);
         app.mount(rootElement);
         window["app"] = app;
+        initSmartTurnOverlay(app);
     });
 }
 // Prevent starting transition
@@ -804,6 +805,18 @@ class ViewerSidebar {
             }
         });
         this.buttonDiv.appendChild(this.statsButton);
+        // Smart Zero-TURN Download Saver Button
+        this.downloadSaverButton = document.createElement("button");
+        this.downloadSaverButton.innerText = "📥 Treo Tải Game (0 GB)";
+        this.downloadSaverButton.title = "Ngắt tạm luồng video để tốn 0 MB băng thông trong khi Colab vẫn tải game ngầm";
+        this.downloadSaverButton.style.borderColor = "#10b981";
+        this.downloadSaverButton.addEventListener("click", () => {
+            setSidebarExtended(false);
+            if (typeof window["colabggEnterPause"] === "function") {
+                window["colabggEnterPause"]("Đang bật Chế độ Treo Tải Game thủ công");
+            }
+        });
+        this.buttonDiv.appendChild(this.downloadSaverButton);
         // Close stream
         this.exitStreamButton.innerText = I.stream.exit;
         this.exitStreamButton.addEventListener("click", () => __awaiter(this, void 0, void 0, function* () {
@@ -1086,4 +1099,120 @@ function stopPropagationOn(element) {
 }
 function onStopPropagation(event) {
     event.stopPropagation();
+}
+function initSmartTurnOverlay(app) {
+    const pill = document.createElement("div");
+    pill.style.cssText = "position:fixed;top:12px;right:14px;z-index:9998;padding:6px 12px;border-radius:999px;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:rgba(15,23,42,0.88);border:1px solid #334155;color:#f8fafc;pointer-events:none;transition:opacity 0.4s ease;box-shadow:0 6px 18px rgba(0,0,0,0.45);";
+    pill.textContent = "🧠 Smart Zero-TURN: Đang dò P2P (0 GB)...";
+    document.body.appendChild(pill);
+    let fadeTimer = null;
+    const showPill = (text, borderColor, autoHideMs = 6500) => {
+        pill.textContent = text;
+        pill.style.borderColor = borderColor;
+        pill.style.opacity = "1";
+        if (fadeTimer) {
+            window.clearTimeout(fadeTimer);
+            fadeTimer = null;
+        }
+        if (autoHideMs > 0) {
+            fadeTimer = window.setTimeout(() => {
+                pill.style.opacity = "0";
+            }, autoHideMs);
+        }
+    };
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:10000;display:none;align-items:center;justify-content:center;background:rgba(2,6,23,0.94);padding:20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#f8fafc;";
+    overlay.innerHTML = `
+      <div style="max-width:480px;width:100%;background:#0f172a;border:1px solid #334155;border-radius:16px;padding:24px;text-align:center;box-shadow:0 20px 45px rgba(0,0,0,0.65);">
+        <div style="display:inline-block;padding:5px 12px;border-radius:999px;background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.4);color:#34d399;font-size:12px;font-weight:700;margin-bottom:12px;">🛡️ Băng thông Stream hiện tại: 0.00 MB/s</div>
+        <h2 style="margin:0 0 8px;font-size:19px;color:#f8fafc;">Đang ở Chế độ Treo Tải Game (0 GB TURN)</h2>
+        <p id="cgg-pause-reason" style="margin:0 0 10px;font-size:13px;color:#38bdf8;font-weight:600;"></p>
+        <p style="margin:0 0 20px;font-size:13px;color:#94a3b8;line-height:1.55;">Luồng hình ảnh về trình duyệt đã tạm ngắt để không tốn 1 KB nào của Cloudflare TURN. <b>Steam, Chrome &amp; Desktop trên Google Colab vẫn đang chạy và tải game tối đa tốc độ ở phía sau!</b></p>
+        <button id="cgg-btn-resume" type="button" style="width:100%;padding:13px 16px;border-radius:10px;border:1px solid #34d399;background:linear-gradient(135deg,#059669,#10b981);color:#022c22;font-size:14.5px;font-weight:800;cursor:pointer;">▶️ Mở lại màn hình Stream ngay</button>
+      </div>
+    `;
+    stopPropagationOn(overlay);
+    document.body.appendChild(overlay);
+    const reasonEl = overlay.querySelector("#cgg-pause-reason");
+    const resumeBtn = overlay.querySelector("#cgg-btn-resume");
+    const enterPause = (reasonText) => {
+        const stream = app.getStream();
+        if (!stream || stream.isPausedForDownload()) {
+            return;
+        }
+        if (document.pointerLockElement) {
+            try {
+                document.exitPointerLock();
+            }
+            catch (_e) { }
+        }
+        if (reasonEl) {
+            reasonEl.textContent = reasonText || "Đã tạm dừng nhận hình ảnh";
+        }
+        overlay.style.display = "flex";
+        void stream.pauseForDownload();
+    };
+    window["colabggEnterPause"] = enterPause;
+    if (resumeBtn) {
+        resumeBtn.addEventListener("click", () => {
+            overlay.style.display = "none";
+            const stream = app.getStream();
+            if (stream) {
+                void stream.resumeFromPause();
+            }
+        });
+    }
+    window.addEventListener("colabgg-route", (ev) => {
+        const d = ev.detail || {};
+        if (d.route === "p2p") {
+            showPill("🟢 P2P Trực tiếp — Tốn 0 GB Cloudflare TURN!", "#10b981", 6500);
+        }
+        else if (d.route === "turn") {
+            showPill("🟡 Đang truyền qua Cloudflare TURN UDP", "#f59e0b", 7500);
+        }
+        else if (d.route === "websocket") {
+            showPill("🔵 Đang truyền qua WebSocket (0 GB TURN)", "#38bdf8", 6500);
+        }
+        else if (d.route === "connecting") {
+            showPill("🧠 " + (d.detail || "Đang kết nối..."), "#38bdf8", 0);
+        }
+    });
+    let idleTimer = null;
+    const clearIdleTimer = () => {
+        if (idleTimer) {
+            window.clearTimeout(idleTimer);
+            idleTimer = null;
+        }
+    };
+    document.addEventListener("visibilitychange", () => {
+        clearIdleTimer();
+        if (document.visibilityState === "visible") {
+            return;
+        }
+        let idleMode = "turn_3m";
+        try {
+            idleMode = localStorage.getItem("colabgg_idle_saver") || "turn_3m";
+        }
+        catch (_e) { }
+        if (idleMode === "off") {
+            return;
+        }
+        const stream = app.getStream();
+        if (!stream || stream.isPausedForDownload()) {
+            return;
+        }
+        const route = stream.getActiveRoute();
+        if (idleMode === "turn_3m" && route !== "turn") {
+            // Direct P2P and WebSocket cost 0 GB of Cloudflare TURN quota!
+            return;
+        }
+        const waitMs = idleMode === "all_1m" ? 60000 : 180000;
+        idleTimer = window.setTimeout(() => {
+            if (document.visibilityState !== "visible") {
+                enterPause(idleMode === "all_1m"
+                    ? "Đã tự động ngắt hình sau 1 phút ẩn tab (Chế độ Treo Tải Game)"
+                    : "Đã tự động ngắt hình sau 3 phút ẩn tab để bảo vệ 1.000 GB TURN");
+            }
+        }, waitMs);
+    });
 }

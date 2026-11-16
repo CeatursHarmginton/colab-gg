@@ -218,12 +218,18 @@ def apply_turn_to_moonweb_config(turn_servers: list[dict], local_client: LocalMo
     if not isinstance(existing, list):
         existing = []
 
-    # Remove old turn.cloudflare.com entries and prepend fresh ones
+    # Ensure fast public STUN servers come FIRST so Smart Zero-TURN P2P hole-punching always succeeds before TURN!
+    default_stuns = [
+        {"urls": ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"]}
+    ]
     cleaned = [
         s for s in existing
-        if not any("cloudflare.com" in str(u) for u in (s.get("urls") if isinstance(s.get("urls"), list) else [s.get("urls")]))
+        if not any(
+            ("cloudflare.com" in str(u)) or ("stun.l.google.com:19302" in str(u))
+            for u in (s.get("urls") if isinstance(s.get("urls"), list) else [s.get("urls")])
+        )
     ]
-    webrtc_cfg["ice_servers"] = list(turn_servers) + cleaned
+    webrtc_cfg["ice_servers"] = default_stuns + cleaned + list(turn_servers)
     cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
     # Restart local web-server cleanly so it reloads server/config.json with TURN UDP enabled

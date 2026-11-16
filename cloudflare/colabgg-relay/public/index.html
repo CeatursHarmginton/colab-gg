@@ -388,7 +388,7 @@
               </select>
             </div>
           </div>
-          <div class="two-col" style="margin-bottom:0;">
+          <div class="two-col" style="margin-bottom:8px;">
             <div>
               <select id="opt-bitrate">
                 <option value="8000">Bitrate: 8 Mbps</option>
@@ -401,6 +401,23 @@
                 <option value="auto" selected>Truyền tải: Auto (Ưu tiên UDP)</option>
                 <option value="webrtc">Ép buộc WebRTC UDP</option>
                 <option value="websocket">Dự phòng WebSocket</option>
+              </select>
+            </div>
+          </div>
+          <label style="margin-top:10px;">🛡️ Chế độ Smart Zero-TURN &amp; Tiết kiệm Băng thông khi Tải Game</label>
+          <div class="two-col" style="margin-bottom:0;">
+            <div>
+              <select id="opt-turn-policy" title="Ưu tiên đi P2P trực tiếp tốn 0 GB TURN, chỉ bật TURN khi mạng chặn P2P">
+                <option value="smart" selected>🧠 Smart Auto: Ưu tiên P2P (0 GB) → Tự bật TURN</option>
+                <option value="off">🔒 Khóa cứng TURN (0 GB tuyệt đối — Chỉ P2P/WS)</option>
+                <option value="always">⚡ Luôn bật TURN ngay (Cho 4G / Tường lửa gắt)</option>
+              </select>
+            </div>
+            <div>
+              <select id="opt-idle-saver" title="Tự động tạm ngắt luồng hình khi bạn ẩn tab để không tốn băng thông TURN lúc chờ tải game">
+                <option value="turn_3m" selected>🛡️ Ẩn tab 3 phút: Ngắt hình nếu dùng TURN</option>
+                <option value="all_1m">📥 Treo tải game: Ẩn tab 1 phút tự ngắt hình</option>
+                <option value="off">♾️ Không tự ngắt khi ẩn tab</option>
               </select>
             </div>
           </div>
@@ -475,6 +492,8 @@
       optFps: document.getElementById("opt-fps"),
       optBitrate: document.getElementById("opt-bitrate"),
       optTransport: document.getElementById("opt-transport"),
+      optTurnPolicy: document.getElementById("opt-turn-policy"),
+      optIdleSaver: document.getElementById("opt-idle-saver"),
     };
 
     let liveWs = null;
@@ -486,10 +505,29 @@
       els.serverUrl.value = location.origin;
       fetch("/api/colabgg/ping").then(r => r.json()).then(d => {
         if (d && d.turnConfigured) {
-          els.turnBadge.textContent = "🟢 Cloudflare TURN UDP Đã kích hoạt";
+          els.turnBadge.textContent = "🟢 Smart Zero-TURN + UDP Active";
         }
       }).catch(() => {});
     }
+
+    try {
+      const savedPolicy = localStorage.getItem("colabgg_turn_policy");
+      if (savedPolicy && ["smart", "off", "always"].includes(savedPolicy)) {
+        els.optTurnPolicy.value = savedPolicy;
+      }
+      const savedIdle = localStorage.getItem("colabgg_idle_saver");
+      if (savedIdle && ["turn_3m", "all_1m", "off"].includes(savedIdle)) {
+        els.optIdleSaver.value = savedIdle;
+      }
+    } catch {}
+
+    els.optTurnPolicy.addEventListener("change", () => {
+      try { localStorage.setItem("colabgg_turn_policy", els.optTurnPolicy.value); } catch {}
+      if (currentStatus) renderStatus(currentStatus);
+    });
+    els.optIdleSaver.addEventListener("change", () => {
+      try { localStorage.setItem("colabgg_idle_saver", els.optIdleSaver.value); } catch {}
+    });
 
     function showMsg(text, kind = "ok") {
       if (!text) {
@@ -607,6 +645,8 @@
       });
       try {
         localStorage.setItem("mlSettings", JSON.stringify(merged));
+        localStorage.setItem("colabgg_turn_policy", els.optTurnPolicy.value || "smart");
+        localStorage.setItem("colabgg_idle_saver", els.optIdleSaver.value || "turn_3m");
       } catch {}
     }
 
@@ -678,7 +718,12 @@
         : "Colab đang Offline / Đã ngắt kết nối";
       els.stGpu.textContent = st.gpuName ? `${st.gpuName}${st.driverVersion && !isCpu ? " (" + st.driverVersion + ")" : ""}` : (online ? "NVIDIA GPU" : "—");
       els.stRes.textContent = st.resolution || "1920x1080@60";
-      els.stTurn.textContent = st.turnConfigured ? "WebRTC UDP (Cloudflare TURN)" : "Auto (WebRTC STUN / WS Relay)";
+      const pol = els.optTurnPolicy.value || "smart";
+      els.stTurn.textContent = pol === "off"
+        ? "Khóa cứng TURN (0 GB — P2P/WS)"
+        : (st.turnConfigured
+            ? (pol === "smart" ? "Smart P2P (0 GB) + TURN Fallback" : "Ưu tiên Cloudflare TURN UDP")
+            : "Auto (WebRTC STUN / WS Relay)");
       els.stRoom.textContent = st.roomId || els.roomId.value;
 
       if (online && !els._presetAutoApplied) {

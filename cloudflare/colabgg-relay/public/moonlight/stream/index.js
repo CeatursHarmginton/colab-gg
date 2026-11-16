@@ -72,7 +72,46 @@ function getVideoCodecHint(settings) {
     return videoCodecHint;
 }
 const WEBRTC_CONNECT_TIMEOUT_MS = 15000;
+const WEBRTC_P2P_FIRST_TIMEOUT_MS = 4000;
 const FALLBACK_RECONNECT_DELAY_MS = 500;
+function getTurnPolicy() {
+    try {
+        const v = localStorage.getItem("colabgg_turn_policy");
+        if (v === "off" || v === "always" || v === "smart") {
+            return v;
+        }
+    }
+    catch (_e) { }
+    return "smart";
+}
+function hasTurnServers(iceServers) {
+    if (!Array.isArray(iceServers)) {
+        return false;
+    }
+    return iceServers.some((s) => {
+        const urls = Array.isArray(s === null || s === void 0 ? void 0 : s.urls) ? s.urls : ((s === null || s === void 0 ? void 0 : s.urls) ? [s.urls] : []);
+        return urls.some((u) => /^turns?:/i.test(String(u)));
+    });
+}
+function buildStunOnlyIceServers(iceServers) {
+    const out = [{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] }];
+    if (Array.isArray(iceServers)) {
+        for (const s of iceServers) {
+            const urls = (Array.isArray(s === null || s === void 0 ? void 0 : s.urls) ? s.urls : ((s === null || s === void 0 ? void 0 : s.urls) ? [s.urls] : []))
+                .filter((u) => /^stuns?:/i.test(String(u)));
+            if (urls.length > 0) {
+                out.push({ urls });
+            }
+        }
+    }
+    return out;
+}
+function emitRouteStatus(route, detail = "") {
+    try {
+        window.dispatchEvent(new CustomEvent("colabgg-route", { detail: { route, detail } }));
+    }
+    catch (_e) { }
+}
 export class Stream {
     constructor(api, hostId, appId, settings, viewerScreenSize, permissions) {
         this.logger = new Logger();
@@ -80,6 +119,8 @@ export class Stream {
         this.eventTarget = new EventTarget();
         this.iceServers = null;
         this.transportOverride = null;
+        this.pausedForDownload = false;
+        this.activeRoute = "connecting";
         this.videoRenderer = null;
         this.audioPlayer = null;
         this.transport = null;
@@ -212,24 +253,77 @@ export class Stream {
     startConnection() {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
+            if (this.pausedForDownload) {
+                return;
+            }
             this.debugLog(`Permissions: ${JSON.stringify(this.permissions)}`);
             const desiredTransport = (_a = this.transportOverride) !== null && _a !== void 0 ? _a : this.settings.dataTransport;
-            this.debugLog(`Using transport: ${desiredTransport}`);
+            const turnPolicy = getTurnPolicy();
+            const turnAvailable = hasTurnServers(this.iceServers);
+            this.debugLog(`Using transport: ${desiredTransport} (turnPolicy=${turnPolicy}, turnAvailable=${turnAvailable})`);
             if (desiredTransport == "auto") {
-                let shutdownReason = yield this.tryWebRTCTransport();
-                if (shutdownReason == "failednoconnect") {
-                    this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" });
+                if (turnPolicy === "always" && turnAvailable) {
+                    emitRouteStatus("connecting", "Đang kết nối WebRTC qua Cloudflare TURN...");
+                    const shutdownReason = yield this.tryWebRTCTransport({ disallowTurn: false, timeoutMs: WEBRTC_CONNECT_TIMEOUT_MS });
+                    if (shutdownReason == "failednoconnect" && !this.pausedForDownload) {
+                        yield this.restartWithFreshTransportFallback("websocket");
+                        return;
+                    }
+                }
+                else {
+                    emitRouteStatus("connecting", "Smart Zero-TURN: Đang ưu tiên kết nối P2P trực tiếp (0 GB)...");
+                    const p2pTimeout = (turnPolicy === "smart" && turnAvailable) ? WEBRTC_P2P_FIRST_TIMEOUT_MS : 6500;
+                    const shutdownReason = yield this.tryWebRTCTransport({ disallowTurn: true, timeoutMs: p2pTimeout });
+                    if (shutdownReason == "failednoconnect" && !this.pausedForDownload) {
+                        if (turnPolicy === "smart" && turnAvailable) {
+                            this.debugLog("[Smart Zero-TURN] Direct STUN P2P blocked by NAT -> Falling back to Cloudflare TURN UDP");
+                            yield this.restartWithFreshTransportFallback("webrtc-turn");
+                            return;
+                        }
+                        this.debugLog("Failed to establish P2P WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" });
+                        yield this.restartWithFreshTransportFallback("websocket");
+                        return;
+                    }
+                }
+            }
+            else if (desiredTransport == "webrtc-turn") {
+                emitRouteStatus("connecting", "Mạng chặn P2P — Tự động chuyển qua Cloudflare TURN UDP...");
+                const shutdownReason = yield this.tryWebRTCTransport({ disallowTurn: false, timeoutMs: WEBRTC_CONNECT_TIMEOUT_MS });
+                if (shutdownReason == "failednoconnect" && !this.pausedForDownload) {
+                    this.debugLog("Failed to establish TURN WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" });
                     yield this.restartWithFreshTransportFallback("websocket");
                     return;
                 }
             }
             else if (desiredTransport == "webrtc") {
-                yield this.tryWebRTCTransport();
+                if (turnPolicy === "off") {
+                    emitRouteStatus("connecting", "Khóa TURN (0 GB): Đang thử P2P trực tiếp...");
+                    yield this.tryWebRTCTransport({ disallowTurn: true, timeoutMs: 8000 });
+                }
+                else if (turnPolicy === "smart" && turnAvailable) {
+                    emitRouteStatus("connecting", "Smart Zero-TURN: Đang thử P2P trực tiếp (0 GB)...");
+                    const shutdownReason = yield this.tryWebRTCTransport({ disallowTurn: true, timeoutMs: WEBRTC_P2P_FIRST_TIMEOUT_MS });
+                    if (shutdownReason == "failednoconnect" && !this.pausedForDownload) {
+                        yield this.restartWithFreshTransportFallback("webrtc-turn-only");
+                        return;
+                    }
+                }
+                else {
+                    yield this.tryWebRTCTransport({ disallowTurn: false, timeoutMs: WEBRTC_CONNECT_TIMEOUT_MS });
+                }
+            }
+            else if (desiredTransport == "webrtc-turn-only") {
+                emitRouteStatus("connecting", "Đang kết nối qua Cloudflare TURN UDP...");
+                yield this.tryWebRTCTransport({ disallowTurn: false, timeoutMs: WEBRTC_CONNECT_TIMEOUT_MS });
             }
             else if (desiredTransport == "websocket") {
+                this.activeRoute = "websocket";
+                emitRouteStatus("websocket", "WebSocket Relay (0 GB TURN)");
                 yield this.tryWebSocketTransport();
             }
-            this.debugLog("Tried all configured transport options but no connection was possible", { type: "fatal" });
+            if (!this.pausedForDownload) {
+                this.debugLog("Tried all configured transport options but no connection was possible", { type: "fatal" });
+            }
         });
     }
     createControlWebSocket() {
@@ -395,13 +489,15 @@ export class Stream {
         general.send(buffer.getRemainingBuffer().buffer);
         return true;
     }
-    tryWebRTCTransport() {
+    tryWebRTCTransport(options) {
         return __awaiter(this, void 0, void 0, function* () {
+            const disallowTurn = Boolean(options && options.disallowTurn);
+            const connectTimeoutMs = (options && options.timeoutMs) ? options.timeoutMs : WEBRTC_CONNECT_TIMEOUT_MS;
             if (!this.permissions.allow_transport_webrtc) {
                 this.debugLog("Not trying WebRTC transport because permissions disallow it");
                 return "failednoconnect";
             }
-            this.debugLog("Trying WebRTC transport");
+            this.debugLog(`Trying WebRTC transport (disallowTurn=${disallowTurn}, timeout=${connectTimeoutMs}ms)`);
             this.sendWsMessage({
                 SetTransport: "WebRTC"
             });
@@ -409,10 +505,11 @@ export class Stream {
                 this.debugLog(`Failed to try WebRTC Transport: no ice servers available`);
                 return "failednoconnect";
             }
-            const transport = new WebRTCTransport(this.logger);
+            const effectiveIceServers = disallowTurn ? buildStunOnlyIceServers(this.iceServers) : this.iceServers;
+            const transport = new WebRTCTransport(this.logger, { disallowTurn });
             transport.onsendmessage = (message) => this.sendWsMessage({ WebRtc: message });
             transport.initPeer({
-                iceServers: this.iceServers
+                iceServers: effectiveIceServers
             });
             this.setTransport(transport);
             const videoCodecSupport = yield this.createPipelines();
@@ -426,12 +523,12 @@ export class Stream {
             // Wait for negotiation, but don't let a stuck ICE check block fallback forever.
             const result = yield new Promise((resolve) => {
                 const timeout = window.setTimeout(() => __awaiter(this, void 0, void 0, function* () {
-                    this.debugLog(`WebRTC negotiation timed out after ${WEBRTC_CONNECT_TIMEOUT_MS}ms`);
+                    this.debugLog(`WebRTC negotiation timed out after ${connectTimeoutMs}ms`);
                     transport.onconnect = null;
                     transport.onclose = null;
                     yield transport.close();
                     resolve(false);
-                }), WEBRTC_CONNECT_TIMEOUT_MS);
+                }), connectTimeoutMs);
                 transport.onconnect = () => {
                     window.clearTimeout(timeout);
                     resolve(true);
@@ -445,6 +542,20 @@ export class Stream {
             if (!result) {
                 return "failednoconnect";
             }
+            const updateDetectedRoute = () => {
+                if (disallowTurn) {
+                    this.activeRoute = "p2p";
+                    emitRouteStatus("p2p", "P2P Trực tiếp (0 GB TURN)");
+                    return;
+                }
+                transport.detectRouteType().then((rt) => {
+                    const resolved = rt || "turn";
+                    this.activeRoute = resolved;
+                    emitRouteStatus(resolved, resolved === "p2p" ? "P2P Trực tiếp (0 GB TURN)" : "Cloudflare TURN UDP");
+                }).catch(() => { });
+            };
+            updateDetectedRoute();
+            window.setTimeout(updateDetectedRoute, 1800);
             return new Promise((resolve) => {
                 transport.onclose = (shutdown) => {
                     resolve(shutdown);
@@ -693,6 +804,46 @@ export class Stream {
         return new Promise((resolve, _reject) => {
             setTimeout(() => resolve(true), 100);
         });
+    }
+    pauseForDownload() {
+        return __awaiter(this, void 0, void 0, function* () {
+            this.pausedForDownload = true;
+            this.activeRoute = "paused";
+            emitRouteStatus("paused", "Đã tạm ngắt hình (0 MB/s) — Colab vẫn đang tải game ngầm!");
+            if (this.transport) {
+                try {
+                    yield this.transport.close();
+                }
+                catch (_e) { }
+                this.transport = null;
+            }
+            if (this.ws && (this.ws.readyState == WebSocket.OPEN || this.ws.readyState == WebSocket.CONNECTING)) {
+                try {
+                    this.ws.close();
+                }
+                catch (_e) { }
+            }
+        });
+    }
+    resumeFromPause() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.pausedForDownload) {
+                return;
+            }
+            this.pausedForDownload = false;
+            this.transportOverride = null;
+            this.activeRoute = "connecting";
+            emitRouteStatus("connecting", "Đang kết nối lại màn hình Stream...");
+            this.wsSendBuffer.length = 0;
+            this.ws = this.createControlWebSocket();
+            this.sendInitMessage();
+        });
+    }
+    getActiveRoute() {
+        return this.activeRoute;
+    }
+    isPausedForDownload() {
+        return Boolean(this.pausedForDownload);
     }
     // -- Class Api
     addInfoListener(listener) {

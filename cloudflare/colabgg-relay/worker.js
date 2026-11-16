@@ -136,7 +136,8 @@ export default {
           }));
           if (assetResp.status === 200) {
             const cachedHeaders = new Headers(assetResp.headers);
-            cachedHeaders.set("cache-control", "public, max-age=86400");
+            const isHeavyStatic = /\.(wasm|png|svg|ico|woff2?)$/i.test(assetPath);
+            cachedHeaders.set("cache-control", isHeavyStatic ? "public, max-age=86400" : "public, max-age=60, must-revalidate");
             return new Response(assetResp.body, { status: 200, headers: cachedHeaders });
           }
           return assetResp;

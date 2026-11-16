@@ -10,8 +10,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 import { TransportChannelId } from "../../api_bindings.js";
 import { CAPABILITIES_CODECS, emptyVideoCodecs, maybeVideoCodecs } from "../video.js";
 export class WebRTCTransport {
-    constructor(logger) {
+    constructor(logger, options) {
         this.implementationName = "webrtc";
+        this.disallowTurn = Boolean(options && options.disallowTurn);
         this.peer = null;
         this.onsendmessage = null;
         this.remoteDescription = null;
@@ -97,7 +98,10 @@ export class WebRTCTransport {
             }
             this.remoteDescription = null;
             if (remoteDescription) {
-                yield this.peer.setRemoteDescription(remoteDescription);
+                const effectiveDesc = (this.disallowTurn && remoteDescription.sdp)
+                    ? { type: remoteDescription.type, sdp: remoteDescription.sdp.replace(/^a=candidate:.*\btyp\s+relay\b.*(?:\r?\n|$)/gim, "") }
+                    : remoteDescription;
+                yield this.peer.setRemoteDescription(effectiveDesc);
                 if (remoteDescription.type == "offer") {
                     yield this.peer.setLocalDescription();
                     const localDescription = this.peer.localDescription;
@@ -120,6 +124,9 @@ export class WebRTCTransport {
         var _a, _b, _c, _d, _e, _f;
         if (event.candidate) {
             const candidate = event.candidate.toJSON();
+            if (this.disallowTurn && candidate.candidate && /\btyp\s+relay\b/i.test(candidate.candidate)) {
+                return;
+            }
             (_a = this.logger) === null || _a === void 0 ? void 0 : _a.debug(`Sending ice candidate: ${candidate.candidate}`);
             this.sendMessage({
                 AddIceCandidate: {
@@ -137,6 +144,10 @@ export class WebRTCTransport {
     addIceCandidate(candidate) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a, _b;
+            if (this.disallowTurn && candidate && candidate.candidate && /\btyp\s+relay\b/i.test(candidate.candidate)) {
+                (_a = this.logger) === null || _a === void 0 ? void 0 : _a.debug(`[Smart Zero-TURN] Ignored remote relay candidate during P2P-first attempt`);
+                return;
+            }
             (_a = this.logger) === null || _a === void 0 ? void 0 : _a.debug(`Received ice candidate: ${candidate.candidate}`);
             if (!this.peer) {
                 (_b = this.logger) === null || _b === void 0 ? void 0 : _b.debug("Buffering ice candidate");
@@ -174,7 +185,7 @@ export class WebRTCTransport {
             }
             this.wasConnected = true;
         }
-        else if ((this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
+        else if (!this.disallowTurn && (this.peer.connectionState == "failed" || this.peer.connectionState == "closed") && this.peer.iceGatheringState == "complete") {
             type = "fatal";
         }
         if (this.peer.connectionState == "failed" || this.peer.connectionState == "closed") {
@@ -357,6 +368,31 @@ export class WebRTCTransport {
             var _a, _b;
             (_a = this.logger) === null || _a === void 0 ? void 0 : _a.debug("Closing WebRTC Peer");
             (_b = this.peer) === null || _b === void 0 ? void 0 : _b.close();
+        });
+    }
+    detectRouteType() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.peer) {
+                return null;
+            }
+            try {
+                const stats = yield this.peer.getStats();
+                const byId = new Map();
+                for (const [k, v] of stats.entries()) {
+                    byId.set(k, v);
+                }
+                for (const [, v] of stats.entries()) {
+                    if (v.type === "candidate-pair" && v.state === "succeeded" && (v.nominated || v.selected)) {
+                        const loc = byId.get(v.localCandidateId);
+                        const rem = byId.get(v.remoteCandidateId);
+                        const lt = loc && loc.candidateType ? String(loc.candidateType) : "";
+                        const rt = rem && rem.candidateType ? String(rem.candidateType) : "";
+                        return (lt === "relay" || rt === "relay") ? "turn" : "p2p";
+                    }
+                }
+            }
+            catch (_e) { }
+            return null;
         });
     }
     getStats() {
