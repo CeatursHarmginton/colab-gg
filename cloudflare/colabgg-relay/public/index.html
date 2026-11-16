@@ -638,12 +638,28 @@
         return;
       }
       const online = Boolean(st.online);
+      const isCpu = String(st.gpuName || "").startsWith("CPU Mode") || st.driverVersion === "software-x264";
       els.stDot.className = "dot " + (online ? "online" : "offline");
-      els.stLabel.textContent = online ? "Colab GPU Đang Online — Sẵn sàng chơi!" : "Colab đang Offline / Đã ngắt kết nối";
-      els.stGpu.textContent = st.gpuName ? `${st.gpuName}${st.driverVersion ? " (" + st.driverVersion + ")" : ""}` : (online ? "NVIDIA GPU" : "—");
+      els.stLabel.textContent = online
+        ? (isCpu ? "Colab CPU Đang Online (Chế độ Tải Game / Desktop nhẹ)" : "Colab GPU Đang Online — Sẵn sàng chơi 60FPS!")
+        : "Colab đang Offline / Đã ngắt kết nối";
+      els.stGpu.textContent = st.gpuName ? `${st.gpuName}${st.driverVersion && !isCpu ? " (" + st.driverVersion + ")" : ""}` : (online ? "NVIDIA GPU" : "—");
       els.stRes.textContent = st.resolution || "1920x1080@60";
       els.stTurn.textContent = st.turnConfigured ? "WebRTC UDP (Cloudflare TURN)" : "Auto (WebRTC STUN / WS Relay)";
       els.stRoom.textContent = st.roomId || els.roomId.value;
+
+      if (online && !els._presetAutoApplied) {
+        els._presetAutoApplied = true;
+        if (isCpu) {
+          els.optRes.value = "720p";
+          els.optFps.value = "30";
+          els.optBitrate.value = "8000";
+        } else {
+          els.optRes.value = "1080p";
+          els.optFps.value = "60";
+          els.optBitrate.value = "15000";
+        }
+      }
 
       els.btnPlayDesktop.disabled = !online;
       els.btnOpenMoonlight.disabled = !online;

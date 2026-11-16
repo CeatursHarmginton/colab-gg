@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ColabGG Cloud Gaming — Fixed & Relay-Enabled Edition
-# Supports:
-#   1) VaultBox-style Cloudflare Relay Room + WebRTC UDP (No trycloudflare!)
-#   2) Optional Cloudflare Zero Trust Named Tunnel (WARP + Native Moonlight App)
-#   3) Legacy Quick Tunnel fallback
+# ColabGG Cloud Gaming — GPU (NVENC 1080p60) + CPU Fallback (Dummy Xorg 720p30)
 # ==============================================================================
 
 set -uo pipefail
 
 if [ ! -d "/content" ] && [ "${FORCE_LINUX:-0}" != "1" ]; then
     echo "======================================================================"
-    echo "[ERROR] Script nay duoc thiet ke de chay tren Google Colab (Linux GPU)!"
-    echo "        This script must be run inside a Google Colab GPU runtime."
-    echo "        (Runtime -> Change runtime type -> Hardware accelerator: T4 GPU)"
+    echo "[ERROR] Script nay duoc thiet ke de chay tren Google Colab (Linux)!"
+    echo "        This script must be run inside a Google Colab runtime."
     echo "======================================================================"
     exit 1
 fi
@@ -39,7 +34,6 @@ AUTO_PAIR="${AUTO_PAIR:-true}"
 KEEP_ALIVE_LOOP="${KEEP_ALIVE_LOOP:-true}"
 SETUP_ONLY="${SETUP_ONLY:-false}"
 
-# Relay & Cloudflare TURN / Zero Trust options
 COLABGG_RELAY_URL="${COLABGG_RELAY_URL:-}"
 COLABGG_ROOM_ID="${COLABGG_ROOM_ID:-}"
 COLABGG_TOKEN="${COLABGG_TOKEN:-}"
@@ -208,6 +202,70 @@ install_matching_nvidia_driver() {
     mark_done "nvidia_driver_installed"
 }
 
+setup_cpu_dummy_display() {
+    if ! already_done "cpu_dummy_installed"; then
+        run_step "Install CPU virtual display driver (xserver-xorg-video-dummy & Mesa)" \
+            "sudo apt-get update -y && sudo apt-get install -y xserver-xorg-video-dummy libgl1-mesa-dri libglx-mesa0 mesa-vulkan-drivers" || return 1
+        mark_done "cpu_dummy_installed"
+    fi
+
+    sudo tee /etc/X11/xorg.conf >/dev/null <<'XORGEOF'
+Section "Device"
+    Identifier  "Configured Video Device"
+    Driver      "dummy"
+    VideoRam    256000
+EndSection
+
+Section "Monitor"
+    Identifier  "Configured Monitor"
+    HorizSync   30.0-130.0
+    VertRefresh 50.0-120.0
+    Modeline "1280x720_60.00" 74.48 1280 1336 1472 1664 720 721 724 746 -HSync +Vsync
+    Modeline "1920x1080_60.00" 172.80 1920 2040 2248 2576 1080 1081 1084 1118 -HSync +Vsync
+EndSection
+
+Section "Screen"
+    Identifier  "Default Screen"
+    Monitor     "Configured Monitor"
+    Device      "Configured Video Device"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "1280x720_60.00" "1920x1080_60.00"
+    EndSubSection
+EndSection
+XORGEOF
+}
+
+configure_sunshine_encoder() {
+    local has_gpu="$1"
+    local conf="/home/user/.config/sunshine/sunshine.conf"
+    sudo mkdir -p /home/user/.config/sunshine
+    sudo touch "$conf"
+
+    # Strip previous auto-managed CPU block so restoring a CPU backup onto a T4 GPU uses NVENC!
+    sudo python3 - "$conf" "$has_gpu" <<'PYSUN'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+has_gpu = sys.argv[2] == "true"
+txt = p.read_text(encoding="utf-8", errors="ignore")
+txt = re.sub(r"\n?# COLABGG_CPU_MODE_START.*?# COLABGG_CPU_MODE_END\n?", "\n", txt, flags=re.S).strip()
+if not has_gpu:
+    block = (
+        "# COLABGG_CPU_MODE_START\n"
+        "capture = x11\n"
+        "encoder = software\n"
+        "sw_preset = ultrafast\n"
+        "# COLABGG_CPU_MODE_END\n"
+    )
+    txt = (txt + "\n\n" + block).lstrip()
+else:
+    txt = txt + ("\n" if txt else "")
+p.write_text(txt, encoding="utf-8")
+PYSUN
+    sudo chown -R user:user /home/user/.config/sunshine
+}
+
 steam_check_loop() {
     log_info "Entering keep-alive & watchdog loop..."
     while true; do
@@ -218,7 +276,6 @@ steam_check_loop() {
             su - user -c 'DISPLAY=:1 nohup sunshine >/tmp/sunshine.log 2>&1 &' || true
         fi
         if [ -n "$COLABGG_RELAY_URL" ] && [ -n "$COLABGG_ROOM_ID" ] && ! pgrep -f "colab_relay_agent.py" >/dev/null 2>&1; then
-            log_warn "Relay agent stopped. Restarting colab_relay_agent.py..."
             COLABGG_RELAY_URL="$COLABGG_RELAY_URL" COLABGG_ROOM_ID="$COLABGG_ROOM_ID" COLABGG_TOKEN="$COLABGG_TOKEN" \
             CF_TURN_KEY_ID="$CF_TURN_KEY_ID" CF_TURN_API_TOKEN="$CF_TURN_API_TOKEN" WEB_USER="$WEB_USER" WEB_PASS="$WEB_PASS" \
             nohup python3 /content/colab_relay_agent.py >/tmp/colabgg_relay.log 2>&1 &
@@ -229,12 +286,16 @@ steam_check_loop() {
 
 main() {
     echo "======================================================================"
-    echo "   ColabGG Cloud Gaming — Sunshine + WebRTC UDP + Cloudflare Relay"
+    echo "   ColabGG Cloud Gaming — Auto GPU (NVENC) / CPU Fallback Edition"
     echo "======================================================================"
 
-    if ! nvidia-smi >/dev/null 2>&1; then
-        log_err "No NVIDIA GPU detected! In Google Colab: Runtime -> Change runtime type -> T4 GPU."
-        exit 1
+    local has_gpu="false"
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+        has_gpu="true"
+        log_info "Hardware Mode: NVIDIA GPU Detected -> Full 1080p60 NVENC Acceleration!"
+    else
+        log_warn "No NVIDIA GPU detected -> Enabling CPU Fallback Mode (720p30 Dummy Xorg + Ultrafast x264)!"
+        log_warn "(Ideal for downloading/installing Steam games & backing up to Drive without using GPU quota)"
     fi
 
     # 1. Base CLI utilities
@@ -291,17 +352,20 @@ main() {
         log_info "Desktop & gaming packages already installed, skipping."
     fi
 
-    # 6. Install matching NVIDIA driver
-    install_matching_nvidia_driver || exit 1
+    # 6. Configure Display Driver (NVIDIA GPU vs CPU Dummy Xorg)
+    if [ "$has_gpu" = "true" ]; then
+        install_matching_nvidia_driver || exit 1
+        run_step "Configure virtual 1920x1080 NVIDIA Xorg screen" \
+            "sudo nvidia-xconfig -a --allow-empty-initial-configuration --virtual=1920x1080 --preserve-busid" || true
+    else
+        setup_cpu_dummy_display || exit 1
+    fi
 
-    # 7. Start virtual 1080p60 Xorg display (:1)
-    run_step "Configure virtual 1920x1080 NVIDIA Xorg screen" \
-        "sudo nvidia-xconfig -a --allow-empty-initial-configuration --virtual=1920x1080 --preserve-busid" || true
-
+    # 7. Start Xorg display (:1)
     if ! pgrep -f "Xorg :1" >/dev/null 2>&1; then
         sudo rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 || true
         log_info "Starting Xorg server on DISPLAY=:1 ..."
-        sudo nohup Xorg :1 -seat seat-1 -novtswitch -nolisten tcp -noreset >/tmp/xorg.log 2>&1 &
+        sudo nohup Xorg :1 -config /etc/X11/xorg.conf -seat seat-1 -novtswitch -nolisten tcp -noreset >/tmp/xorg.log 2>&1 &
         for _ in $(seq 1 15); do
             if DISPLAY=:1 xrandr >/dev/null 2>&1; then
                 break
@@ -320,12 +384,19 @@ main() {
     local xout=""
     xout=$(DISPLAY=:1 xrandr 2>/dev/null | awk '/ connected/{print $1; exit}')
     if [ -n "$xout" ]; then
-        DISPLAY=:1 xrandr --output "$xout" --mode 1920x1080 --rate 60 >/dev/null 2>&1 || \
-        DISPLAY=:1 xrandr --output "$xout" --mode 1920x1080 >/dev/null 2>&1 || true
+        if [ "$has_gpu" = "true" ]; then
+            DISPLAY=:1 xrandr --output "$xout" --mode 1920x1080 --rate 60 >/dev/null 2>&1 || \
+            DISPLAY=:1 xrandr --output "$xout" --mode 1920x1080 >/dev/null 2>&1 || true
+        else
+            DISPLAY=:1 xrandr --output "$xout" --mode "1280x720_60.00" >/dev/null 2>&1 || \
+            DISPLAY=:1 xrandr --output "$xout" --mode 1280x720 >/dev/null 2>&1 || true
+        fi
     fi
 
     # 8. Start PulseAudio (virtual sink), Openbox, Sunshine, Steam, Heroic, Chrome
     [ -f /bakdeb/nvidia-wallpaper.jpg ] && sudo cp -f /bakdeb/nvidia-wallpaper.jpg /home/user/nvidia-wallpaper.jpg && sudo chown user:user /home/user/nvidia-wallpaper.jpg
+
+    configure_sunshine_encoder "$has_gpu"
 
     log_info "Starting PulseAudio, Openbox, Sunshine, Steam & desktop tools..."
     su - user -c 'pulseaudio --check >/dev/null 2>&1 || pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true'
@@ -562,16 +633,14 @@ PYAUTOPAIR
         return 0
     fi
 
-    # 11. Optional Cloudflare Zero Trust Named Tunnel (WARP + Native Moonlight App)
+    # 11. Optional Cloudflare Zero Trust Named Tunnel
     if [ -n "$CF_TUNNEL_TOKEN" ]; then
         if [ ! -x /usr/local/bin/cloudflared ]; then
             run_step "Install cloudflared binary" \
                 "sudo wget -q --retry-connrefused --tries=3 '$CLOUDFLARED_URL' -O /usr/local/bin/cloudflared && sudo chmod +x /usr/local/bin/cloudflared" || true
         fi
         pkill -f "cloudflared tunnel.*--token" >/dev/null 2>&1 || true
-        log_info "Starting Cloudflare Zero Trust Private Tunnel (QUIC)..."
         nohup /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol quic run --token "$CF_TUNNEL_TOKEN" >/tmp/cf_zerotrust.log 2>&1 &
-        log_info "Zero Trust Active! Colab Internal IP for Native Moonlight App: $(hostname -I | awk '{print $1}')"
     fi
 
     # 12. Primary Connection Mode: VaultBox-style Cloudflare Relay Room OR Legacy Quick Tunnel
@@ -704,13 +773,15 @@ class LocalMoonWebClient:
         return []
 
 
-def query_gpu_telemetry() -> tuple[str, str, str]:
+def query_gpu_telemetry() -> tuple[str, str, str, str]:
     gpu_name, driver_ver, priv_ip = "", "", ""
+    resolution = "1920x1080@60"
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
             text=True,
             timeout=4,
+            stderr=subprocess.DEVNULL,
         ).strip()
         if out:
             parts = [p.strip() for p in out.splitlines()[0].split(",")]
@@ -718,13 +789,29 @@ def query_gpu_telemetry() -> tuple[str, str, str]:
             driver_ver = parts[1] if len(parts) > 1 else ""
     except Exception:
         pass
+
+    if not gpu_name:
+        # CPU Fallback Mode — read CPU model & vCPU count
+        cores = os.cpu_count() or 2
+        cpu_model = "Colab CPU"
+        try:
+            for line in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.lower().startswith("model name"):
+                    cpu_model = line.split(":", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+        gpu_name = f"CPU Mode ({cores} vCPU - {cpu_model})"
+        driver_ver = "software-x264"
+        resolution = "1280x720@30"
+
     try:
         ip_out = subprocess.check_output(["hostname", "-I"], text=True, timeout=3).strip().split()
         if ip_out:
             priv_ip = ip_out[0]
     except Exception:
         pass
-    return gpu_name, driver_ver, priv_ip
+    return gpu_name, driver_ver, priv_ip, resolution
 
 
 def fetch_direct_cloudflare_turn() -> list[dict]:
@@ -883,7 +970,7 @@ async def relay_main() -> None:
     if direct_turn:
         local_client.turn_applied = await asyncio.to_thread(apply_turn_to_moonweb_config, direct_turn, local_client)
 
-    gpu_name, driver_ver, priv_ip = await asyncio.to_thread(query_gpu_telemetry)
+    gpu_name, driver_ver, priv_ip, resolution = await asyncio.to_thread(query_gpu_telemetry)
     backoff = 2
 
     while True:
@@ -897,7 +984,7 @@ async def relay_main() -> None:
                     "serverName": "ColabGG Cloud Gaming",
                     "gpuName": gpu_name,
                     "driverVersion": driver_ver,
-                    "resolution": "1920x1080@60",
+                    "resolution": resolution,
                     "privateIp": priv_ip,
                     "turnActive": local_client.turn_applied,
                     "apps": apps,
@@ -914,6 +1001,7 @@ async def relay_main() -> None:
                             "type": "heartbeat",
                             "gpuName": gpu_name,
                             "driverVersion": driver_ver,
+                            "resolution": resolution,
                             "privateIp": priv_ip,
                             "turnActive": local_client.turn_applied,
                             "apps": cur_apps,
@@ -966,7 +1054,6 @@ PYRELAYEOF
         done
         log_info "ColabGG Relay Room '$COLABGG_ROOM_ID' is LIVE!"
     else
-        # Fallback Quick Tunnel only if Relay Room mode is not used
         if [ ! -x /usr/local/bin/cloudflared ]; then
             run_step "Install cloudflared binary" \
                 "sudo wget -q --retry-connrefused --tries=3 '$CLOUDFLARED_URL' -O /usr/local/bin/cloudflared && sudo chmod +x /usr/local/bin/cloudflared" || exit 1

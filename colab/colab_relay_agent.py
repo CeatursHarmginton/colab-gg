@@ -122,13 +122,15 @@ class LocalMoonWebClient:
         return []
 
 
-def query_gpu_telemetry() -> tuple[str, str, str]:
+def query_gpu_telemetry() -> tuple[str, str, str, str]:
     gpu_name, driver_ver, priv_ip = "", "", ""
+    resolution = "1920x1080@60"
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
             text=True,
             timeout=4,
+            stderr=subprocess.DEVNULL,
         ).strip()
         if out:
             parts = [p.strip() for p in out.splitlines()[0].split(",")]
@@ -136,13 +138,29 @@ def query_gpu_telemetry() -> tuple[str, str, str]:
             driver_ver = parts[1] if len(parts) > 1 else ""
     except Exception:
         pass
+
+    if not gpu_name:
+        # CPU Fallback Mode — read CPU model & vCPU count
+        cores = os.cpu_count() or 2
+        cpu_model = "Colab CPU"
+        try:
+            for line in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.lower().startswith("model name"):
+                    cpu_model = line.split(":", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+        gpu_name = f"CPU Mode ({cores} vCPU - {cpu_model})"
+        driver_ver = "software-x264"
+        resolution = "1280x720@30"
+
     try:
         ip_out = subprocess.check_output(["hostname", "-I"], text=True, timeout=3).strip().split()
         if ip_out:
             priv_ip = ip_out[0]
     except Exception:
         pass
-    return gpu_name, driver_ver, priv_ip
+    return gpu_name, driver_ver, priv_ip, resolution
 
 
 def fetch_direct_cloudflare_turn() -> list[dict]:
@@ -301,7 +319,7 @@ async def relay_main() -> None:
     if direct_turn:
         local_client.turn_applied = await asyncio.to_thread(apply_turn_to_moonweb_config, direct_turn, local_client)
 
-    gpu_name, driver_ver, priv_ip = await asyncio.to_thread(query_gpu_telemetry)
+    gpu_name, driver_ver, priv_ip, resolution = await asyncio.to_thread(query_gpu_telemetry)
     backoff = 2
 
     while True:
@@ -315,7 +333,7 @@ async def relay_main() -> None:
                     "serverName": "ColabGG Cloud Gaming",
                     "gpuName": gpu_name,
                     "driverVersion": driver_ver,
-                    "resolution": "1920x1080@60",
+                    "resolution": resolution,
                     "privateIp": priv_ip,
                     "turnActive": local_client.turn_applied,
                     "apps": apps,
@@ -332,6 +350,7 @@ async def relay_main() -> None:
                             "type": "heartbeat",
                             "gpuName": gpu_name,
                             "driverVersion": driver_ver,
+                            "resolution": resolution,
                             "privateIp": priv_ip,
                             "turnActive": local_client.turn_applied,
                             "apps": cur_apps,
