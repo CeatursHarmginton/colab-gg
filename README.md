@@ -1,51 +1,43 @@
-# Colab-Cloud-Gaming
-UPDATED: Run Steam and Play Game on Google Colab (12/06/2026).
- + Steam is working properly now!!!
+# ColabGG — Cloud Gaming (Kiểu VaultBox: Auto Room ID + Cloudflare Relay + WebRTC UDP)
 
-[![See in Demo](https://i.ibb.co/fY9gCWZ6/image-1.png)](https://youtube.com/playlist?list=PLaeZFgkd40LduqR6UHV2ZqiysVTXkPHUJ)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CeatursHarmginton/colab-gg/blob/main/ColabSteam.ipynb)
 
-<a href="https://colab.research.google.com/#create=true" id="blank-colab-badge">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open Blank Colab">
-</a>
+Biến máy ảo **Google Colab (NVIDIA T4 GPU)** thành máy chủ Cloud Gaming (Steam / Heroic / Linux Desktop) với cơ chế **kết nối 1 chạm giống hệt VaultBox**:
+- Colab tự sinh **`Room ID` + `Connection Token`** (`COLABGG_CONNECT: {...}`) và tự copy vào Clipboard.
+- Mở **Web Client trên trình duyệt** → bấm **Dán từ Clipboard** (hoặc bấm nút **Mở Web Client & Kết nối ngay** trên Colab) → **Vào thẳng màn hình Game**, bỏ hẳn `trycloudflare.com`, không cần đăng nhập `admin/admin`, không cần nhập mã PIN Moonlight!
+- Truyền tải hình ảnh/âm thanh 1080p 60fps bằng **WebRTC UDP (qua Cloudflare Realtime TURN 1.000 GB/tháng miễn phí)** — không bị khựng hình TCP như bản gốc.
 
+---
 
-```
-#@title Mobile Play + Colab Setup { display-mode: "form" }
-from IPython.display import display, HTML
-from google.colab import drive
+## ⚡ Bước chuẩn bị 1 lần duy nhất trên máy tính của bạn
 
-# Display looping audio to keep Colab alive
-display(HTML("""
-<b>Ensure this audio is playing to prevent Colab from shutting down in mobile!</b><br/>
-<audio autoplay="" src="https://bit.ly/49tNxyn" loop controls></audio>
-"""))
+1. **Deploy Worker `colabgg-relay` riêng lên tài khoản Cloudflare của bạn:**
+   - Nháy đúp chạy file **[`DeployRelay.bat`](DeployRelay.bat)** (hoặc chạy `cd cloudflare/colabgg-relay && wrangler deploy`).
+   - Sau khi chạy xong, bạn sẽ có địa chỉ Web Client & Relay cố định:
+     `https://colabgg-relay.<subdomain-của-bạn>.workers.dev`
+2. **(Khuyên dùng) Bật Cloudflare Realtime TURN UDP miễn phí 1 TB/tháng:**
+   - Vào [Cloudflare Dashboard](https://dash.cloudflare.com) → menu **Realtime (Calls) → TURN Apps** → bấm **Create** để lấy `Key ID` và `API Token`.
+   - Nháy đúp chạy **[`SetupTurnSecrets.bat`](SetupTurnSecrets.bat)** và dán 2 mã đó vào. Từ lúc này Worker tự động cấp kênh truyền video **UDP thuần** cho cả Colab lẫn Trình duyệt!
 
-# Mount Google Drive
-drive.mount('/content/drive')
+---
 
-# Show Colab VM region
-!echo "Colab Region: $(curl -s ipinfo.io | jq -r '.region')"
+## 🎮 Cách chơi mỗi lần mở Colab
 
-# Download, make executable, and run your script
-!curl -sLkO https://bit.ly/4nDms1d
-!chmod +x 4nDms1d
-!./4nDms1d
-```
-- Control support in Moonlight OK (virtual gamepad and gamepad not available)
-- Sunshine web UI: https://tailscaleip:47990
-  
-Required Chrome, Moonlight.
+1. Mở [Google Colab](https://colab.research.google.com) → **Upload** file **[`ColabSteam.ipynb`](ColabSteam.ipynb)**.
+2. Chọn GPU: **Runtime → Change runtime type → T4 GPU** → **Save**.
+3. Điền URL Worker của bạn vào ô `Relay_Server_URL` (mặc định đã điền sẵn `https://colabgg-relay.lefantasusdelimei.workers.dev`) rồi bấm **Run**.
+4. Sau ~3–5 phút cài đặt, thẻ **ColabGG Cloud Gaming Server is Ready** hiện ra:
+   - Bấm thẳng nút **🚀 Mở Web Client & Kết nối ngay**, **HOẶC**
+   - Chạy **[`OpenWebClient.bat`](OpenWebClient.bat)** / mở link Worker trên bất kỳ trình duyệt nào → bấm **📋 Dán từ Clipboard** → bấm **🖥️ Vào thẳng Màn hình Desktop (1-Click)**!
 
- - For login first time type any usr/pass u want, then add localhost as address!
-   
- - For keeping colab runtime simple login itself into chrome inside it!
+*(Tùy chọn nâng cao)*: Nếu bạn muốn dùng thêm **App Moonlight gốc + Cloudflare WARP** song song với Web Client, chỉ cần điền `CF_ZeroTrust_Tunnel_Token` ở ô cấu hình trong Notebook.
 
-- Backup features will save all your files from the current session to the drive, reducing wait time by 50–75% during your next use (only back up once if needed; ensure the drive has more space than the game size).
-  + Example: For large Steam/Epic or any large game that has a long download/install time and requires compiling shaders on first launch — do all the necessary steps until you can play the game — then take a backup to the drive so next time you can play instantly without waiting.
-- You can share a backup to another Drive account by sharing the download link with the target account, then creating a shortcut to the backup file in the target Drive (the backup.tar.gz file must not be inside any folder).
+---
 
-- Always check the remaining usage time and disconnect when not in use (4-hour play time resets every 24 hours). Do not hide or switch the Colab tab to avoid disconnection.
+## 📂 Cấu trúc dự án
 
-- Drive mount is optional, you can comment out the code with # if you don't want to use it (i added an Open in Colab link to make it easier to use).
-  
-If have any error re-run script again.
+- [`cloudflare/colabgg-relay/`](cloudflare/colabgg-relay/) — Cloudflare Worker + Durable Object (`ColabGGRoom`) + Giao diện Web Client (`public/index.html` & `public/moonlight/`).
+- [`colab/colab_relay_agent.py`](colab/colab_relay_agent.py) — Agent chạy trên Colab kết nối WebSocket ra Worker, tự động đăng nhập ngầm, cấu hình TURN UDP và cầu nối luồng điều khiển.
+- [`ColabSteam.ipynb`](ColabSteam.ipynb) — Notebook Server Launcher tự động đóng gói toàn bộ script (upload 1 file duy nhất lên Colab là chạy).
+- [`colab-moonweb.sh`](colab-moonweb.sh) & [`moon-pair.sh`](moon-pair.sh) — Bộ script cài đặt Linux/GPU/Sunshine/Moonlight-Web đã sửa toàn bộ lỗi gốc.
+- [`DeployRelay.bat`](DeployRelay.bat), [`SetupTurnSecrets.bat`](SetupTurnSecrets.bat), [`OpenWebClient.bat`](OpenWebClient.bat) — Công cụ triển khai & mở nhanh trên Windows.
