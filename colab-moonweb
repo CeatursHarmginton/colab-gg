@@ -274,8 +274,9 @@ install_native_gaming_packages() {
 }
 
 install_matching_nvidia_driver() {
-    local xorg_drv="/usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so"
-    if already_done "nvidia_driver_installed" && [ -f "$xorg_drv" ] && nvidia-smi >/dev/null 2>&1; then
+    local xorg_drv="/usr/lib/xorg/modules/drivers/nvidia_drv.so"
+    local xorg_glx="/usr/lib/xorg/modules/extensions/libglxserver_nvidia.so"
+    if already_done "nvidia_driver_installed" && [ -f "$xorg_drv" ] && [ -e "$xorg_glx" ] && nvidia-smi >/dev/null 2>&1; then
         log_info "NVIDIA Xorg & 32/64-bit userspace libraries already configured, skipping."
         return 0
     fi
@@ -313,10 +314,15 @@ install_matching_nvidia_driver() {
 
     if [ "$dl_ok" = "true" ]; then
         chmod +x "$installer"
-        run_step "Unpack & configure container-safe NVIDIA Xorg, NVENC & 32/64-bit GL/Vulkan ($host_ver)" "
+        log_info "Running NVIDIA userspace & Xorg installer ($host_ver)..."
+        (echo 1 | sudo "$installer" --no-kernel-module --ui=none --no-questions >> "$LOG_FILE" 2>&1) || true
+
+        run_step "Ensure NVIDIA Xorg (/usr/lib/xorg/modules), NVENC & 32/64-bit GL/Vulkan ($host_ver)" "
             sudo rm -rf /tmp/nv_extract
             sudo '$installer' --extract-only --target /tmp/nv_extract
-            sudo mkdir -p /usr/lib/x86_64-linux-gnu/xorg/modules/drivers \
+            sudo mkdir -p /usr/lib/xorg/modules/drivers \
+                          /usr/lib/xorg/modules/extensions \
+                          /usr/lib/x86_64-linux-gnu/xorg/modules/drivers \
                           /usr/lib/x86_64-linux-gnu/xorg/modules/extensions \
                           /usr/local/lib/nvidia64 \
                           /usr/local/lib/nvidia32 \
@@ -325,21 +331,31 @@ install_matching_nvidia_driver() {
 
             nv_drv=\$(find /tmp/nv_extract -maxdepth 2 -name 'nvidia_drv.so' -print -quit)
             if [ -n \"\$nv_drv\" ]; then
+                sudo cp -f \"\$nv_drv\" /usr/lib/xorg/modules/drivers/nvidia_drv.so
                 sudo cp -f \"\$nv_drv\" /usr/lib/x86_64-linux-gnu/xorg/modules/drivers/nvidia_drv.so
             fi
 
             glx_so=\$(find /tmp/nv_extract -maxdepth 2 -name 'libglxserver_nvidia.so.*' -print -quit)
             if [ -n \"\$glx_so\" ]; then
                 base_glx=\$(basename \"\$glx_so\")
-                sudo cp -f \"\$glx_so\" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/
-                sudo ln -sf \"\$base_glx\" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so
-                sudo ln -sf \"\$base_glx\" /usr/lib/x86_64-linux-gnu/xorg/modules/extensions/libglxserver_nvidia.so.1
+                for ext_dir in /usr/lib/xorg/modules/extensions /usr/lib/x86_64-linux-gnu/xorg/modules/extensions; do
+                    sudo cp -f \"\$glx_so\" \"\$ext_dir/\"
+                    sudo ln -sf \"\$base_glx\" \"\$ext_dir/libglxserver_nvidia.so\"
+                    sudo ln -sf \"\$base_glx\" \"\$ext_dir/libglxserver_nvidia.so.1\"
+                done
             fi
 
             nv_xcfg=\$(find /tmp/nv_extract -maxdepth 2 -name 'nvidia-xconfig' -type f -print -quit)
             if [ -n \"\$nv_xcfg\" ]; then
                 sudo cp -f \"\$nv_xcfg\" /usr/local/bin/nvidia-xconfig
                 sudo chmod +x /usr/local/bin/nvidia-xconfig
+            fi
+
+            nv_mp=\$(find /tmp/nv_extract -maxdepth 2 -name 'nvidia-modprobe' -type f -print -quit)
+            if [ -n \"\$nv_mp\" ]; then
+                sudo cp -f \"\$nv_mp\" /usr/local/bin/nvidia-modprobe
+                sudo chmod 4755 /usr/local/bin/nvidia-modprobe
+                sudo /usr/local/bin/nvidia-modprobe -u -c=0 -m 2>/dev/null || true
             fi
 
             find /tmp/nv_extract -maxdepth 1 -type f -name '*.so.*' ! -name 'libglxserver_nvidia*' -exec sudo cp -f {} /usr/local/lib/nvidia64/ \;
@@ -375,10 +391,10 @@ EOF
 EOF
 
     printf "/usr/lib64-nvidia\n/usr/local/lib/nvidia64\n/usr/local/lib/nvidia32\n" | sudo tee /etc/ld.so.conf.d/99-colabgg-nvidia.conf >/dev/null
-    sudo ldconfig
+    sudo ldconfig 2>/dev/null || true
     sudo chmod 666 /dev/nvidia* /dev/dri/* 2>/dev/null || true
 
-    if [ ! -f "$xorg_drv" ]; then
+    if [ ! -f "$xorg_drv" ] && [ ! -f "/usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so" ]; then
         log_err "nvidia_drv.so was not installed at $xorg_drv!"
         return 1
     fi
@@ -388,6 +404,7 @@ EOF
 
 write_nvidia_xorg_conf() {
     local headless_none="${1:-false}"
+    sudo rm -f /etc/X11/xorg.conf /etc/X11/xorg.conf.backup 2>/dev/null || true
     if command -v nvidia-xconfig >/dev/null 2>&1; then
         if [ "$headless_none" = "true" ]; then
             sudo nvidia-xconfig -a --allow-empty-initial-configuration --use-display-device=None --virtual=1920x1080 --preserve-busid >> "$LOG_FILE" 2>&1 && return 0
@@ -617,8 +634,9 @@ main() {
     fi
 
     if ! DISPLAY=:1 xrandr >/dev/null 2>&1; then
-        log_err "Xorg :1 failed to start! Check /tmp/xorg.log:"
-        tail -n 35 /tmp/xorg.log || true
+        log_err "Xorg :1 failed to start! Check /var/log/Xorg.1.log & /tmp/xorg.log:"
+        grep -E "\((EE|WW)\)" /var/log/Xorg.1.log 2>/dev/null | tail -n 35 || true
+        tail -n 35 /var/log/Xorg.1.log 2>/dev/null || tail -n 35 /tmp/xorg.log || true
         exit 1
     fi
 
